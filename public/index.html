@@ -8,31 +8,32 @@
       :root { color-scheme: dark; }
       body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #0b1020; color: #e8ecf3; }
       header { padding: 16px 20px; border-bottom: 1px solid #29304a; }
-      main { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; padding: 16px; }
+      main { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 16px; }
       section { background: #121a2d; border: 1px solid #29304a; border-radius: 12px; padding: 14px; min-height: 70vh; }
       h1, h2, h3, p { margin: 0 0 12px; }
       .muted { color: #9aa5bd; }
       .composer { display: flex; gap: 8px; margin-top: 12px; }
-      textarea { width: 100%; min-height: 90px; background: #0b1020; color: #fff; border: 1px solid #3a4365; border-radius: 8px; padding: 10px; }
+      textarea, input { width: 100%; background: #0b1020; color: #fff; border: 1px solid #3a4365; border-radius: 8px; padding: 10px; }
+      textarea { min-height: 90px; }
       button { background: #7c8cff; color: #09101f; border: 0; border-radius: 8px; padding: 9px 12px; font-weight: 700; cursor: pointer; }
       button.secondary { background: #27304a; color: #e8ecf3; }
       ul { list-style: none; padding: 0; margin: 0; }
       li, pre { background: #0d1425; border: 1px solid #24304d; border-radius: 8px; padding: 10px; margin-bottom: 10px; overflow: auto; }
       .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
       .badge { display: inline-block; font-size: 12px; padding: 3px 8px; border-radius: 999px; background: #24304d; color: #b8c2d8; }
-      .actions { display: flex; gap: 8px; margin-top: 8px; }
+      .actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
       .small { font-size: 12px; }
     </style>
   </head>
   <body>
     <header>
-      <h1>Palpa Voice POC — Stage 0 + 1</h1>
-      <p class="muted">Lean proof: text event → curator → patch validator → live session object</p>
+      <h1>Palpa Voice POC — Lean governance + Codex handoff</h1>
+      <p class="muted">Text event → curator → validator → session object → Codex context pack → simulated agent run</p>
     </header>
     <main>
       <section>
         <h2>Live Conversation</h2>
-        <p class="muted">Use text now; it already matches the future transcript event shape.</p>
+        <p class="muted">Text now, same event shape as future voice.</p>
         <div class="composer">
           <textarea id="message" placeholder="Say something like: We need voice-first collaboration and should keep the contracts lean."></textarea>
         </div>
@@ -43,7 +44,7 @@
         <ul id="transcript"></ul>
       </section>
       <section>
-        <h2>Curated Session Object</h2>
+        <h2>Curated Session</h2>
         <div id="session"></div>
       </section>
       <section>
@@ -52,10 +53,21 @@
         <h3 style="margin-top:16px">Audit Log</h3>
         <ul id="audit"></ul>
       </section>
+      <section>
+        <h2>Codex Handoff</h2>
+        <input id="codexTask" value="Review the session and suggest the next lean changes." />
+        <div class="actions">
+          <button id="runCodex">Run simulated Codex</button>
+        </div>
+        <h3 style="margin-top:16px">Current Context Pack</h3>
+        <div id="contextPack"></div>
+        <h3 style="margin-top:16px">Agent Runs</h3>
+        <ul id="agentRuns"></ul>
+      </section>
     </main>
     <script>
       const $ = (id) => document.getElementById(id);
-      const state = { session: null, pendingPatches: [] };
+      const state = { session: null, pendingPatches: [], codexContextPack: null };
 
       async function post(url, body) {
         const res = await fetch(url, {
@@ -85,7 +97,8 @@
             usefulContextSummary: s.conversationState.usefulContextSummary,
             decisions: s.outputs.decisions,
             openQuestions: s.outputs.openQuestions,
-            risks: s.outputs.risks
+            risks: s.outputs.risks,
+            codexFindings: s.outputs.codexFindings
           }, null, 2)}</pre>
         `;
 
@@ -108,6 +121,19 @@
             <div>${item.reason}</div>
           </li>
         `).join('');
+
+        $('contextPack').innerHTML = state.codexContextPack
+          ? `<pre>${JSON.stringify(state.codexContextPack, null, 2)}</pre>`
+          : '<p class="muted">No context pack built yet.</p>';
+
+        $('agentRuns').innerHTML = s.agentRuns.length ? s.agentRuns.map((run) => `
+          <li>
+            <div class="row"><strong>${run.id}</strong><span class="badge">${run.status}</span></div>
+            <div>${run.task}</div>
+            <div class="small muted">contextPack: ${run.contextPackId}</div>
+            ${run.resultSummary ? `<div class="small">${run.resultSummary}</div>` : ''}
+          </li>
+        `).join('') : '<p class="muted">No agent runs yet.</p>';
       }
 
       async function reviewPatch(id, decision) {
@@ -122,11 +148,16 @@
         $('message').value = '';
       });
 
+      $('runCodex').addEventListener('click', async () => {
+        await post('/api/agents/codex/run', { task: $('codexTask').value.trim() });
+      });
+
       const es = new EventSource('/api/events');
       es.onmessage = (event) => {
         const data = JSON.parse(event.data);
         state.session = data.session;
         state.pendingPatches = data.pendingPatches;
+        state.codexContextPack = data.codexContextPack;
         render();
       };
     </script>

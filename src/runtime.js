@@ -4,10 +4,13 @@ import {
   createTranscriptEvent,
   EVENT_TYPES,
   PATCH_STATUS,
+  PATCH_RISK,
   validatePatchProposal
 } from './contracts.js';
 import { policyRejectReason, requiresHumanReview } from './policy.js';
 import { curateTranscriptEvent } from './curator.js';
+import { buildCodexContextPack } from './context-builder.js';
+import { simulateCodexRun } from './codex-sim.js';
 
 function deepClone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -65,12 +68,17 @@ export class SessionRuntime {
   getProjection() {
     return {
       session: deepClone(this.session),
-      pendingPatches: deepClone(this.pendingPatches)
+      pendingPatches: deepClone(this.pendingPatches),
+      codexContextPack: deepClone(this.session.contextPacks.codex || null)
     };
   }
 
   emitProjection() {
     this.emitter.emit('projection');
+  }
+
+  addAuditPatch(entry) {
+    this.session.audit.patchLog.unshift(entry);
   }
 
   ingestMessage({ speaker, text }) {
@@ -101,7 +109,7 @@ export class SessionRuntime {
         sourceEventId: sourceEvent?.id || null
       };
       this.pendingPatches.unshift(pending);
-      this.session.audit.patchLog.unshift({
+      this.addAuditPatch({
         id: proposal.id,
         type: EVENT_TYPES.SESSION_PATCH_PROPOSED,
         status: PATCH_STATUS.NEEDS_REVIEW,
@@ -124,7 +132,7 @@ export class SessionRuntime {
     next.updatedAt = new Date().toISOString();
     next.transcript.lastCuratedAt = next.updatedAt;
     this.session = next;
-    this.session.audit.patchLog.unshift({
+    this.addAuditPatch({
       id: proposal.id,
       type: EVENT_TYPES.SESSION_PATCH_APPLIED,
       status: PATCH_STATUS.ACCEPTED,
@@ -145,7 +153,7 @@ export class SessionRuntime {
       createdAt: new Date().toISOString(),
       sourceEventId: sourceEvent?.id || null
     };
-    this.session.audit.patchLog.unshift(item);
+    this.addAuditPatch(item);
     this.emitProjection();
     return item;
   }
@@ -157,7 +165,7 @@ export class SessionRuntime {
 
     if (decision === 'approve') {
       const result = this.applyAcceptedPatch({ ...patch, desiredApplyMode: 'auto' });
-      this.session.audit.patchLog.unshift({
+      this.addAuditPatch({
         id: patch.id,
         type: EVENT_TYPES.SESSION_PATCH_REVIEWED,
         status: PATCH_STATUS.ACCEPTED,
@@ -168,7 +176,7 @@ export class SessionRuntime {
       return result;
     }
 
-    this.session.audit.patchLog.unshift({
+    this.addAuditPatch({
       id: patch.id,
       type: EVENT_TYPES.SESSION_PATCH_REVIEWED,
       status: PATCH_STATUS.REJECTED,
@@ -177,5 +185,63 @@ export class SessionRuntime {
     });
     this.emitProjection();
     return { ...patch, status: PATCH_STATUS.REJECTED };
+  }
+
+  updateAgentRun(agentRunId, updates) {
+    const run = this.session.agentRuns.find((item) => item.id === agentRunId);
+    if (!run) return null;
+    Object.assign(run, updates, { updatedAt: new Date().toISOString() });
+    this.session.updatedAt = new Date().toISOString();
+    this.emitProjection();
+    return run;
+  }
+
+  startCodexRun(task = 'Review the current session and suggest the next lean changes.') {
+    const contextPack = buildCodexContextPack(this.session);
+    this.session.contextPacks.codex = contextPack;
+
+    const agentRun = {
+      id: `COD-${Date.now()}`,
+      agent: 'codex',
+      status: 'running',
+      task,
+      contextPackId: contextPack.id,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      resultSummary: null
+    };
+    this.session.agentRuns.unshift(agentRun);
+    this.session.updatedAt = new Date().toISOString();
+    this.emitProjection();
+
+    const result = simulateCodexRun({ session: this.session, contextPack });
+    this.updateAgentRun(agentRun.id, {
+      status: 'completed',
+      resultSummary: result.summary,
+      findingsCount: result.findings.length
+    });
+
+    const proposal = {
+      id: `patch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      sessionId: this.session.id,
+      producer: {
+        type: 'codex',
+        id: 'codex-sim'
+      },
+      reason: `Codex run ${agentRun.id} proposed lean session updates`,
+      confidence: 0.78,
+      evidenceRefs: result.evidenceRefs,
+      operations: result.operations,
+      risk: PATCH_RISK.MEDIUM,
+      desiredApplyMode: 'human_review'
+    };
+
+    const patchResult = this.proposePatch(proposal);
+    return {
+      agentRun: deepClone(this.session.agentRuns.find((run) => run.id === agentRun.id)),
+      contextPack: deepClone(contextPack),
+      patchResult,
+      findings: result.findings
+    };
   }
 }

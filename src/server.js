@@ -77,6 +77,16 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/agents/codex/run') {
+    try {
+      const body = await readBody(req);
+      const result = runtime.startCodexRun(body.task);
+      return json(res, 200, result);
+    } catch (error) {
+      return json(res, 400, { error: error.message });
+    }
+  }
+
   if (req.method === 'POST' && url.pathname.startsWith('/api/patches/') && url.pathname.endsWith('/review')) {
     try {
       const id = url.pathname.split('/')[3];

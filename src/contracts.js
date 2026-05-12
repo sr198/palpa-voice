@@ -51,7 +51,8 @@ export function createSession({ id = 'HUD-001', title = 'Palpa POC Session' } = 
     outputs: {
       decisions: [],
       openQuestions: [],
-      risks: []
+      risks: [],
+      codexFindings: []
     },
     agentRuns: [],
     contextPacks: {},

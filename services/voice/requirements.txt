@@ -1,0 +1,4 @@
+aiohttp==3.11.18
+faster-whisper==1.1.1
+kokoro==0.7.9
+soundfile==0.13.1

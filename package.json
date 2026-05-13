@@ -1,10 +1,13 @@
 {
-  "name": "palpa-voice-poc",
+  "name": "palpa-voice",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
+  "workspaces": [
+    "apps/*"
+  ],
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node tools/dev.mjs",
+    "start": "node tools/start.mjs",
+    "verify": "node tools/verify.mjs"
   }
 }

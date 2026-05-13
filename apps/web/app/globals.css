@@ -105,6 +105,11 @@ h1 {
   line-height: 1.55;
 }
 
+.replyText,
+.artifactText {
+  white-space: pre-wrap;
+}
+
 .error {
   margin-top: 12px;
   color: #9c2f1f;
@@ -116,6 +121,40 @@ h1 {
 
 .controls {
   margin-top: 18px;
+}
+
+.selectorGroup {
+  margin-top: 18px;
+}
+
+.fieldLabel,
+.helperText {
+  display: block;
+}
+
+.fieldLabel {
+  margin-bottom: 8px;
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--accent-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.helperText {
+  margin-top: 10px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+select {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  font: inherit;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .primary {

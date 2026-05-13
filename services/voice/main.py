@@ -6,6 +6,7 @@ import math
 import os
 import struct
 import wave
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, Optional
@@ -33,7 +34,7 @@ def pcm16_to_wav_bytes(pcm_bytes: bytes, sample_rate: int = 16000) -> bytes:
     return buffer.getvalue()
 
 
-def synthesize_tone(text: str, duration_ms: int = 850, sample_rate: int = 24000) -> bytes:
+def synthesize_tone_pcm(text: str, duration_ms: int = 850, sample_rate: int = 24000) -> bytes:
     amplitude = 0.22
     frequency = 440 if len(text) % 2 == 0 else 554
     frames = int(sample_rate * (duration_ms / 1000))
@@ -43,7 +44,11 @@ def synthesize_tone(text: str, duration_ms: int = 850, sample_rate: int = 24000)
         value = int(amplitude * 32767 * math.sin((2 * math.pi * frequency * frame) / sample_rate))
         payload.extend(struct.pack("<h", value))
 
-    return pcm16_to_wav_bytes(bytes(payload), sample_rate=sample_rate)
+    return bytes(payload)
+
+
+def synthesize_tone(text: str, duration_ms: int = 850, sample_rate: int = 24000) -> bytes:
+    return pcm16_to_wav_bytes(synthesize_tone_pcm(text, duration_ms, sample_rate), sample_rate=sample_rate)
 
 
 class WhisperAdapter:
@@ -103,7 +108,6 @@ class KokoroAdapter:
             self.error = str(exc)
 
     def synthesize(self, text: str, voice_id: str) -> Dict[str, object]:
-        print("Trying to synthesize with voice_id:", voice_id)
         if voice_id not in SUPPORTED_VOICES:
             raise ValueError("unsupported voice id")
 
@@ -114,21 +118,36 @@ class KokoroAdapter:
             audio = synthesize_tone(text)
             return {"audio": audio, "provider": self.provider, "duration_ms": 850}
 
-        generator = self.pipeline(text, voice=voice_id)
-        audio_chunks = []
         sample_rate = 24000
-
-        for _, _, audio in generator:
-            audio_chunks.extend(audio)
-
         pcm = bytearray()
-        for sample in audio_chunks:
-            value = max(-1.0, min(1.0, sample))
-            pcm.extend(struct.pack("<h", int(value * 32767)))
+        for chunk in self.synthesize_stream(text, voice_id):
+            pcm.extend(chunk)
 
         audio = pcm16_to_wav_bytes(bytes(pcm), sample_rate=sample_rate)
         duration_ms = int((len(pcm) / 2 / sample_rate) * 1000)
         return {"audio": audio, "provider": self.provider, "duration_ms": duration_ms}
+
+    def synthesize_stream(self, text: str, voice_id: str):
+        if voice_id not in SUPPORTED_VOICES:
+            raise ValueError("unsupported voice id")
+
+        if not text:
+            raise ValueError("text is required")
+
+        if not self.loaded or self.pipeline is None:
+            pcm = synthesize_tone_pcm(text)
+            chunk_size = 4096
+            for offset in range(0, len(pcm), chunk_size):
+                yield pcm[offset : offset + chunk_size]
+            return
+
+        generator = self.pipeline(text, voice=voice_id)
+        for _, _, audio in generator:
+            pcm = bytearray()
+            for sample in audio:
+                value = max(-1.0, min(1.0, sample))
+                pcm.extend(struct.pack("<h", int(value * 32767)))
+            yield bytes(pcm)
 
 
 @dataclass
@@ -170,7 +189,6 @@ class VoiceService:
         )
 
     async def synthesize(self, request: web.Request) -> web.Response:
-        print("Received TTS request")
         payload = await request.json()
         voice_id = payload.get("voice_id", "")
         output_format = payload.get("output_format", "wav")
@@ -189,8 +207,65 @@ class VoiceService:
         response.headers["x-duration-ms"] = str(result["duration_ms"])
         return response
 
+    async def synthesize_stream(self, request: web.Request) -> web.StreamResponse:
+        payload = await request.json()
+        voice_id = payload.get("voice_id", "")
+        text = str(payload.get("text", "")).strip()
+        output_format = payload.get("output_format", "wav")
+
+        if output_format != "wav":
+            return web.json_response({"error": "only wav output is supported"}, status=400)
+
+        try:
+            chunk_iter = self.kokoro.synthesize_stream(text, voice_id)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+        response = web.StreamResponse(
+            status=200,
+            headers={"Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store"},
+        )
+        await response.prepare(request)
+
+        sample_rate = 24000
+        total_pcm_bytes = 0
+
+        for index, chunk in enumerate(chunk_iter):
+            total_pcm_bytes += len(chunk)
+            await response.write(
+                (
+                    json.dumps(
+                        {
+                            "type": "audio_chunk",
+                            "sequence": index,
+                            "audio": base64.b64encode(chunk).decode("utf-8"),
+                            "sample_rate_hz": sample_rate,
+                            "channels": 1,
+                            "encoding": "pcm_s16le",
+                        }
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+
+        duration_ms = int((total_pcm_bytes / 2 / sample_rate) * 1000) if total_pcm_bytes else 0
+        await response.write(
+            (
+                json.dumps(
+                    {
+                        "type": "audio_end",
+                        "voice_id": voice_id,
+                        "provider": self.kokoro.provider,
+                        "duration_ms": duration_ms,
+                    }
+                )
+                + "\n"
+            ).encode("utf-8")
+        )
+        await response.write_eof()
+        return response
+
     async def asr_ws(self, request: web.Request) -> web.WebSocketResponse:
-        print("ASR WebSocket connection established")
         ws = web.WebSocketResponse()
         await ws.prepare(request)
 
@@ -257,8 +332,6 @@ class VoiceService:
 
 
 def base64_decode(payload: str) -> bytes:
-    import base64
-
     return base64.b64decode(payload.encode("utf-8"))
 
 
@@ -270,6 +343,7 @@ def build_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/health", service.health)
     app.router.add_post("/tts/synthesize", service.synthesize)
+    app.router.add_post("/tts/stream", service.synthesize_stream)
     app.router.add_get("/asr", service.asr_ws)
     return app
 

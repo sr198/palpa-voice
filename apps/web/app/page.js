@@ -59,9 +59,24 @@ function downsampleTo16k(channelData, sourceRate) {
   return result;
 }
 
+function base64ToInt16(base64) {
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new Int16Array(bytes.buffer);
+}
+
 export default function Home() {
   const [connectionState, setConnectionState] = useState('connecting');
   const [session, setSession] = useState(null);
+  const [agents, setAgents] = useState([]);
+  const [skills, setSkills] = useState([]);
+  const [apps, setApps] = useState([]);
+  const [selectedAgentId, setSelectedAgentId] = useState('architect');
   const [turn, setTurn] = useState(null);
   const [partialTranscript, setPartialTranscript] = useState('');
   const [finalTranscript, setFinalTranscript] = useState('');
@@ -69,7 +84,6 @@ export default function Home() {
   const [error, setError] = useState('');
   const [status, setStatus] = useState(idleStatus);
   const [isRecording, setIsRecording] = useState(false);
-  const [audioSrc, setAudioSrc] = useState('');
   const [micReady, setMicReady] = useState(false);
 
   const wsRef = useRef(null);
@@ -81,6 +95,8 @@ export default function Home() {
   const sequenceRef = useRef(0);
   const turnIdRef = useRef(null);
   const recordingRef = useRef(false);
+  const playbackContextRef = useRef(null);
+  const playbackCursorRef = useRef(0);
 
   useEffect(() => {
     const ws = new WebSocket(`${wsOrigin}/ws`);
@@ -107,13 +123,21 @@ export default function Home() {
 
       if (message.type === 'session.started') {
         setSession(message);
+        setAgents(message.agents || []);
+        setSkills(message.skills || []);
+        setApps(message.apps || []);
+        if (message.agents?.length) {
+          setSelectedAgentId((current) => (
+            message.agents.some((agent) => agent.id === current) ? current : message.agents[0].id
+          ));
+        }
         setStatus(`Session ${message.session_id} ready.`);
       }
 
       if (message.type === 'turn.started') {
         turnIdRef.current = message.turn_id;
         setTurn(message);
-        setStatus(`Turn ${message.turn_id} recording.`);
+        setStatus(`Turn ${message.turn_id} recording for ${message.target_agent_id}.`);
       }
 
       if (message.type === 'turn.partial_transcript') {
@@ -130,22 +154,37 @@ export default function Home() {
       if (message.type === 'reply.selected') {
         setReply((current) => ({
           ...(current || {}),
-          role_id: message.role_id,
-          role_name: message.role_name,
+          gateway_id: message.gateway_id,
+          gateway_name: message.gateway_name,
+          agent_id: message.agent_id,
+          agent_name: message.agent_name,
+          agent_role: message.agent_role,
           voice_id: message.voice_id,
-          text: message.text
+          spoken_text: message.spoken_text,
+          artifact_text: message.artifact_text,
+          text: message.text,
+          topics: message.topics || [],
+          provider: message.provider,
+          mode: message.mode,
+          warning: message.warning,
+          thread_id: message.thread_id,
+          skills_used: message.skills_used || []
         }));
-        setStatus(`Reply selected: ${message.role_name}.`);
+        setStatus(`Reply selected: ${message.agent_name}.`);
       }
 
       if (message.type === 'reply.ready') {
-        const nextAudioSrc = `${apiOrigin}${message.audio_url}`;
-        setAudioSrc(nextAudioSrc);
-        setReply((current) => ({
-          ...(current || {}),
-          audio_url: nextAudioSrc
-        }));
-        setStatus('Synthesized audio ready.');
+        playbackCursorRef.current = 0;
+        setStatus('Synthesized audio stream starting.');
+      }
+
+      if (message.type === 'reply.audio_chunk') {
+        void queuePlaybackChunk(message);
+        setStatus('Streaming reply audio...');
+      }
+
+      if (message.type === 'reply.audio_end') {
+        setStatus(`Reply audio complete from ${message.provider}.`);
       }
 
       if (message.type === 'turn.completed') {
@@ -182,8 +221,45 @@ export default function Home() {
       if (audioContextRef.current) {
         audioContextRef.current.close();
       }
+      if (playbackContextRef.current) {
+        playbackContextRef.current.close();
+      }
     };
   }, []);
+
+  async function ensurePlaybackContext() {
+    if (!playbackContextRef.current) {
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      playbackContextRef.current = new AudioContextCtor({ sampleRate: 24000 });
+    }
+
+    if (playbackContextRef.current.state === 'suspended') {
+      await playbackContextRef.current.resume();
+    }
+
+    return playbackContextRef.current;
+  }
+
+  async function queuePlaybackChunk(message) {
+    const playbackContext = await ensurePlaybackContext();
+    const pcm = base64ToInt16(message.audio);
+    const samples = new Float32Array(pcm.length);
+
+    for (let index = 0; index < pcm.length; index += 1) {
+      samples[index] = pcm[index] / 32768;
+    }
+
+    const buffer = playbackContext.createBuffer(message.channels || 1, samples.length, message.sample_rate_hz || 24000);
+    buffer.copyToChannel(samples, 0);
+
+    const source = playbackContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(playbackContext.destination);
+
+    const startAt = Math.max(playbackContext.currentTime + 0.03, playbackCursorRef.current || 0);
+    source.start(startAt);
+    playbackCursorRef.current = startAt + buffer.duration;
+  }
 
   async function ensureMicrophone() {
     if (streamRef.current && audioContextRef.current) {
@@ -256,7 +332,7 @@ export default function Home() {
     setReply(null);
     setFinalTranscript('');
     setPartialTranscript('');
-    setAudioSrc('');
+    playbackCursorRef.current = 0;
 
     const ready = await ensureMicrophone();
     if (!ready || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -269,6 +345,7 @@ export default function Home() {
     wsRef.current.send(
       JSON.stringify({
         type: 'turn.start',
+        target_agent_id: selectedAgentId,
         audio_format: {
           encoding: 'pcm_s16le',
           sample_rate_hz: 16000,
@@ -329,9 +406,37 @@ export default function Home() {
               <dt>Mic</dt>
               <dd>{micReady ? 'Ready' : 'Not granted'}</dd>
             </div>
+            <div>
+              <dt>Agent</dt>
+              <dd>{selectedAgentId}</dd>
+            </div>
+            <div>
+              <dt>Skills</dt>
+              <dd>{skills.length}</dd>
+            </div>
+            <div>
+              <dt>Apps</dt>
+              <dd>{apps.length}</dd>
+            </div>
           </dl>
           <p className="status">{status}</p>
           {error ? <p className="error">{error}</p> : null}
+          {session?.warning ? <p className="error">{session.warning}</p> : null}
+          <div className="selectorGroup">
+            <label className="fieldLabel" htmlFor="agent-select">
+              Voice target
+            </label>
+            <select id="agent-select" value={selectedAgentId} onChange={(event) => setSelectedAgentId(event.target.value)} disabled={isRecording || !agents.length}>
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name} · {agent.role}
+                </option>
+              ))}
+            </select>
+            <p className="helperText">
+              The gateway keeps routing explicit for now. You choose which specialist receives the turn.
+            </p>
+          </div>
           <div className="controls">
             <button className="primary" onClick={isRecording ? stopRecording : startRecording} disabled={connectionState !== 'connected'}>
               {isRecording ? 'Stop Turn' : 'Push To Talk'}
@@ -355,16 +460,48 @@ export default function Home() {
           <h2>Reply</h2>
           <dl className="facts">
             <div>
+              <dt>Gateway</dt>
+              <dd>{reply?.gateway_name || session?.gateway?.name || 'Pending'}</dd>
+            </div>
+            <div>
+              <dt>Agent</dt>
+              <dd>{reply?.agent_name || 'Pending'}</dd>
+            </div>
+            <div>
               <dt>Role</dt>
-              <dd>{reply?.role_name || 'Pending'}</dd>
+              <dd>{reply?.agent_role || 'Pending'}</dd>
             </div>
             <div>
               <dt>Voice</dt>
               <dd>{reply?.voice_id || 'Pending'}</dd>
             </div>
+            <div>
+              <dt>Mode</dt>
+              <dd>{reply?.mode || 'Pending'}</dd>
+            </div>
+            <div>
+              <dt>Provider</dt>
+              <dd>{reply?.provider || 'Pending'}</dd>
+            </div>
+            <div>
+              <dt>Thread</dt>
+              <dd>{reply?.thread_id || 'Pending'}</dd>
+            </div>
           </dl>
-          <p className="replyText">{reply?.text || 'Mock reply text will render here.'}</p>
-          <audio key={audioSrc} controls autoPlay src={audioSrc || undefined} className="audio" />
+          <div className="transcriptBlock">
+            <h3>Spoken reply</h3>
+            <p className="replyText">{reply?.spoken_text || 'The TTS-safe spoken reply will land here.'}</p>
+          </div>
+          <div className="transcriptBlock">
+            <h3>Artifact text</h3>
+            <p className="replyText artifactText">{reply?.artifact_text || 'The richer artifact text will render here separately from speech.'}</p>
+          </div>
+          <div className="transcriptBlock">
+            <h3>Skills used</h3>
+            <p>{reply?.skills_used?.length ? reply.skills_used.join(', ') : 'No explicit repo skill attachments were used for this turn.'}</p>
+          </div>
+          {reply?.warning ? <p className="error">{reply.warning}</p> : null}
+          <p className="status">Playback is streamed progressively over Web Audio.</p>
         </article>
       </section>
     </main>

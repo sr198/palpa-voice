@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { config as defaultConfig } from './config.js';
 import { SessionStore } from './session-store.js';
+import { codexRoutingConfigured, discoverCodexWorkspace, gatewayAgent, listAgents } from './agents.js';
 
 export async function buildApp({ config = defaultConfig, random = Math.random } = {}) {
   const app = Fastify();
@@ -15,6 +16,10 @@ export async function buildApp({ config = defaultConfig, random = Math.random } 
 
   app.get('/health', async () => {
     let voice = { ok: false };
+    const [codexConfigured, codexWorkspace] = await Promise.all([
+      codexRoutingConfigured(config),
+      discoverCodexWorkspace({ config })
+    ]);
 
     try {
       const response = await fetch(config.voiceHealthUrl);
@@ -27,21 +32,28 @@ export async function buildApp({ config = defaultConfig, random = Math.random } 
       ok: true,
       service: 'palpa-api',
       ports: { web: 3000, api: 3001, voice: 8000 },
-      voice
+      voice,
+      codex: {
+        configured: codexConfigured,
+        model: config.codexModel || null,
+        auth_method: codexWorkspace.codex.auth_method,
+        cwd: codexWorkspace.codex.cwd,
+        warning: codexWorkspace.warning
+      },
+      gateway: {
+        id: gatewayAgent.id,
+        name: gatewayAgent.name,
+        role: gatewayAgent.role
+      },
+      agents: listAgents(),
+      skills: codexWorkspace.skills,
+      apps: codexWorkspace.apps
     };
   });
 
   app.get('/audio/:sessionId/:turnId', async (request, reply) => {
-    const { sessionId, turnId } = request.params;
-    const record = store.getAudio(sessionId, turnId);
-
-    if (!record) {
-      reply.code(404);
-      return { error: 'Audio not found.' };
-    }
-
-    reply.header('Content-Type', record.contentType);
-    return reply.send(record.buffer);
+    reply.code(410);
+    return { error: 'Audio route is not used in streaming mode.' };
   });
 
   app.get('/ws', { websocket: true }, (socket) => {

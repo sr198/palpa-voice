@@ -1,6 +1,6 @@
 import { createEvent } from './events.js';
-import { selectMockReply } from './roles.js';
-import { createVoiceAsrClient, synthesizeVoice } from './voice-client.js';
+import { discoverCodexWorkspace, generateAgentReply, gatewayAgent, listAgents } from './agents.js';
+import { createVoiceAsrClient, synthesizeVoiceStream } from './voice-client.js';
 
 function sessionMessage(type, payload) {
   return JSON.stringify({ type, ...payload });
@@ -19,13 +19,14 @@ function buildTurnId(random = Math.random) {
 }
 
 export class SessionStore {
-  constructor({ config, random = Math.random, createAsrClient = createVoiceAsrClient, synthesize = synthesizeVoice }) {
+  constructor({ config, random = Math.random, createAsrClient = createVoiceAsrClient, synthesizeStream = synthesizeVoiceStream, agentReplyFactory = generateAgentReply, agentBootstrapFactory = discoverCodexWorkspace }) {
     this.config = config;
     this.random = random;
     this.createAsrClient = createAsrClient;
-    this.synthesize = synthesize;
+    this.synthesizeStream = synthesizeStream;
+    this.agentReplyFactory = agentReplyFactory;
+    this.agentBootstrapFactory = agentBootstrapFactory;
     this.sessions = new Map();
-    this.audio = new Map();
   }
 
   getOrCreateSession(socket) {
@@ -39,7 +40,12 @@ export class SessionStore {
       id: buildSessionId(this.random),
       socket,
       currentTurn: null,
-      events: []
+      events: [],
+      agentState: {
+        threadsByAgentId: new Map(),
+        skillsByName: new Map(),
+        appsById: new Map()
+      }
     };
 
     socket.sessionId = session.id;
@@ -51,15 +57,39 @@ export class SessionStore {
     const session = this.getOrCreateSession(socket);
 
     if (message.type === 'session.start') {
+      const bootstrap = await this.agentBootstrapFactory({
+        config: this.config
+      });
+
+      for (const skill of bootstrap.skills || []) {
+        session.agentState.skillsByName.set(skill.name, skill);
+      }
+
+      for (const app of bootstrap.apps || []) {
+        session.agentState.appsById.set(app.id, app);
+      }
+
       send(socket, 'session.started', {
         session_id: session.id,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        gateway: {
+          id: gatewayAgent.id,
+          name: gatewayAgent.name,
+          role: gatewayAgent.role,
+          voice_id: gatewayAgent.voiceId,
+          summary: gatewayAgent.summary
+        },
+        agents: listAgents(),
+        codex: bootstrap.codex,
+        skills: bootstrap.skills,
+        apps: bootstrap.apps,
+        warning: bootstrap.warning
       });
       return;
     }
 
     if (message.type === 'turn.start') {
-      await this.startTurn(session, message.audio_format);
+      await this.startTurn(session, message.audio_format, message.target_agent_id);
       return;
     }
 
@@ -73,7 +103,7 @@ export class SessionStore {
     }
   }
 
-  async startTurn(session, audioFormat) {
+  async startTurn(session, audioFormat, targetAgentId) {
     if (session.currentTurn && session.currentTurn.state !== 'completed' && session.currentTurn.state !== 'error') {
       send(session.socket, 'turn.error', { error: 'Only one active turn is allowed per session.' });
       return;
@@ -86,7 +116,8 @@ export class SessionStore {
       bytesReceived: 0,
       startedAt: Date.now(),
       finalTranscript: '',
-      partialTranscript: ''
+      partialTranscript: '',
+      targetAgentId: targetAgentId || 'architect'
     };
 
     session.currentTurn = turn;
@@ -120,6 +151,7 @@ export class SessionStore {
       session_id: session.id,
       turn_id: turn.id,
       state: turn.state,
+      target_agent_id: turn.targetAgentId,
       timestamp: new Date().toISOString()
     });
   }
@@ -215,54 +247,107 @@ export class SessionStore {
 
   async generateReply(session, turn) {
     turn.state = 'reply_generating';
-    const selection = selectMockReply(this.random);
+    const selection = await this.agentReplyFactory({
+      sessionState: session.agentState,
+      targetAgentId: turn.targetAgentId,
+      transcript: turn.finalTranscript,
+      config: this.config
+    });
     session.events.push(
       createEvent('voice.reply.selected', session.id, turn.id, {
-        role_id: selection.role.id,
-        role_name: selection.role.name,
-        voice_id: selection.role.voiceId,
-        text: selection.reply
+        gateway_id: selection.gateway.id,
+        gateway_name: selection.gateway.name,
+        agent_id: selection.agent.id,
+        agent_name: selection.agent.name,
+        agent_role: selection.agent.role,
+        voice_id: selection.agent.voiceId,
+        spoken_text: selection.spokenText,
+        artifact_text: selection.artifactText,
+        topics: selection.topics,
+        provider: selection.provider,
+        mode: selection.mode,
+        warning: selection.warning,
+        thread_id: selection.threadId,
+        skills_used: selection.skillsUsed
       })
     );
 
     send(session.socket, 'reply.selected', {
       session_id: session.id,
       turn_id: turn.id,
-      role_id: selection.role.id,
-      role_name: selection.role.name,
-      voice_id: selection.role.voiceId,
-      text: selection.reply
+      gateway_id: selection.gateway.id,
+      gateway_name: selection.gateway.name,
+      agent_id: selection.agent.id,
+      agent_name: selection.agent.name,
+      agent_role: selection.agent.role,
+      voice_id: selection.agent.voiceId,
+      spoken_text: selection.spokenText,
+      artifact_text: selection.artifactText,
+      text: selection.spokenText,
+      topics: selection.topics,
+      provider: selection.provider,
+      mode: selection.mode,
+      warning: selection.warning,
+      thread_id: selection.threadId,
+      skills_used: selection.skillsUsed
     });
 
     turn.state = 'synthesizing';
 
     try {
-      const synthesis = await this.synthesize(this.config.voiceTtsUrl, {
-        text: selection.reply,
-        voice_id: selection.role.voiceId,
-        output_format: 'wav'
+      send(session.socket, 'reply.ready', {
+        session_id: session.id,
+        turn_id: turn.id,
+        stream: {
+          encoding: 'pcm_s16le',
+          channels: 1
+        }
       });
 
-      const audioKey = `${session.id}:${turn.id}`;
-      this.audio.set(audioKey, {
-        buffer: synthesis.buffer,
-        contentType: synthesis.contentType,
-        expiresAt: Date.now() + 1000 * 60 * 10
+      let durationMs = 0;
+      let provider = 'unknown';
+
+      await this.synthesizeStream(this.config.voiceTtsStreamUrl, {
+        text: selection.spokenText,
+        voice_id: selection.agent.voiceId,
+        output_format: 'wav'
+      }, (event) => {
+        if (event.type === 'audio_chunk') {
+          send(session.socket, 'reply.audio_chunk', {
+            session_id: session.id,
+            turn_id: turn.id,
+            sequence: event.sequence,
+            audio: event.audio,
+            sample_rate_hz: event.sample_rate_hz,
+            channels: event.channels,
+            encoding: event.encoding
+          });
+          return;
+        }
+
+        if (event.type === 'audio_end') {
+          durationMs = event.duration_ms || 0;
+          provider = event.provider || provider;
+          send(session.socket, 'reply.audio_end', {
+            session_id: session.id,
+            turn_id: turn.id,
+            duration_ms: durationMs,
+            provider
+          });
+        }
       });
 
       session.events.push(
         createEvent('voice.reply.synthesized', session.id, turn.id, {
-          voice_id: synthesis.voiceId,
-          provider: synthesis.provider,
-          duration_ms: synthesis.durationMs
+          gateway_id: selection.gateway.id,
+          agent_id: selection.agent.id,
+          voice_id: selection.agent.voiceId,
+          provider,
+          duration_ms: durationMs,
+          reply_provider: selection.provider,
+          reply_mode: selection.mode
         })
       );
-
-      send(session.socket, 'reply.ready', {
-        session_id: session.id,
-        turn_id: turn.id,
-        audio_url: `/audio/${session.id}/${turn.id}`
-      });
 
       turn.state = 'completed';
       const elapsedMs = Date.now() - turn.startedAt;
@@ -306,14 +391,5 @@ export class SessionStore {
     }
 
     session.currentTurn = null;
-  }
-
-  getAudio(sessionId, turnId) {
-    const record = this.audio.get(`${sessionId}:${turnId}`);
-    if (!record || record.expiresAt < Date.now()) {
-      this.audio.delete(`${sessionId}:${turnId}`);
-      return null;
-    }
-    return record;
   }
 }

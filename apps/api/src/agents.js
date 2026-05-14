@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 
 import { getCodexProvider, initializeAgentRuntime } from './agent-runtime.js';
+import { buildCodexSandboxPolicy } from './codex-settings.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const roleSkillNameByAgentId = {
@@ -399,16 +400,6 @@ function buildTurnPrompt(agent, transcript) {
   ].join('\n\n');
 }
 
-function buildSandboxPolicy(config) {
-  return {
-    type: 'workspaceWrite',
-    writableRoots: [config.codexCwd || repoRoot],
-    networkAccess: config.codexNetworkAccess !== false,
-    excludeTmpdirEnvVar: false,
-    excludeSlashTmp: false
-  };
-}
-
 async function ensureRoleSession({ runtime, sessionState, targetAgentId, config }) {
   const agent = resolveAgent(targetAgentId);
   const existingSessionId = sessionState.threadsByAgentId.get(agent.id);
@@ -424,7 +415,7 @@ async function ensureRoleSession({ runtime, sessionState, targetAgentId, config 
     metadata: {
       model: config.codexModel || null,
       approvalPolicy: config.codexApprovalPolicy || 'never',
-      sandboxPolicy: buildSandboxPolicy(config),
+      sandboxPolicy: buildCodexSandboxPolicy(config),
       developerInstructions: buildRoleInstructions(agent)
     }
   });
@@ -665,7 +656,7 @@ export async function generateAgentReply({ sessionState, targetAgentId, transcri
       metadata: {
         cwd: config.codexCwd || repoRoot,
         approvalPolicy: config.codexApprovalPolicy || 'never',
-        sandboxPolicy: buildSandboxPolicy(config),
+        sandboxPolicy: buildCodexSandboxPolicy(config),
         model: config.codexModel || null,
         outputSchema: replyOutputSchema
       }

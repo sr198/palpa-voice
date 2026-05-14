@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { config as defaultConfig } from './config.js';
 import { ChatService } from './chat-service.js';
+import { getCodexDiagnostics } from './codex-diagnostics.js';
 import { SessionStore } from './session-store.js';
 import { codexRoutingConfigured, discoverCodexWorkspace, gatewayAgent, listAgents } from './agents.js';
 
@@ -76,6 +77,7 @@ export async function buildApp({ config = defaultConfig, random = Math.random, c
         cwd: codexWorkspace.codex.cwd,
         warning: codexWorkspace.warning
       },
+      codex_diagnostics: getCodexDiagnostics(config),
       gateway: {
         id: gatewayAgent.id,
         name: gatewayAgent.name,

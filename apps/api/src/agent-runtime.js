@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CodexProvider, InMemoryRuntimeStore, SessionManager } from '../../../packages/agent-runtime/src/index.js';
+import { buildCodexSandboxPolicy } from './codex-settings.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -15,7 +16,7 @@ export function getAgentRuntime(config = {}) {
         codexCwd: config.codexCwd || repoRoot,
         codexModel: config.codexModel || null,
         codexApprovalPolicy: config.codexApprovalPolicy || null,
-        codexSandboxPolicy: config.codexSandboxPolicy || null,
+        codexSandboxPolicy: buildCodexSandboxPolicy(config),
         clientName: 'palpa-api',
         clientTitle: 'Palpa API',
         clientVersion: '0.1.0',

@@ -62,6 +62,37 @@ Useful env vars:
 - `CODEX_NETWORK_ACCESS`: optional, defaults to `true`
 - `CODEX_TURN_TIMEOUT_MS`: optional, defaults to `30000`
 
+### Ubuntu 24+ AppArmor note for `workspace-write`
+
+On Ubuntu 24+ the local Codex Linux sandbox can fail even when `bwrap` is installed and user namespaces are enabled.
+
+Symptom:
+
+- shell/tool calls fail
+- Codex reports it cannot read the workspace through the shell
+- `bwrap` fails with:
+  - `bwrap: setting up uid map: Permission denied`
+
+Cause:
+
+- AppArmor can block `bwrap` user namespace setup on these systems
+
+One working fix is to add `/etc/apparmor.d/bwrap` with:
+
+```text
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+```
+
+Then restart AppArmor.
+
+After that, re-check `http://127.0.0.1:3001/health` and inspect `codex_diagnostics.bwrap_self_check`.
+
 ### 3. Start the stack
 
 ```bash
@@ -166,6 +197,7 @@ So the stack can still be exercised even if the full native voice path is not av
 ## Known Session 02 constraints
 
 - `codex app-server` may not start correctly inside constrained sandboxes; local machine execution works better.
+- On Ubuntu 24+, AppArmor may block `bwrap` and break Codex `workspace-write` shell access until the local AppArmor profile is adjusted.
 - Live Codex turns can be slower than mock/local fallback replies, so the API enforces a turn timeout.
 - The structured artifact contract is in place, but live Codex turns still need better population of fields like:
   - `files_touched`

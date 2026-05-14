@@ -1,20 +1,6 @@
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
 import { discoverCodexWorkspace, gatewayAgent, listAgents, resolveAgent } from './agents.js';
 import { initializeAgentRuntime } from './agent-runtime.js';
-
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-
-function buildSandboxPolicy(config) {
-  return {
-    type: 'workspaceWrite',
-    writableRoots: [config.codexCwd || repoRoot],
-    networkAccess: config.codexNetworkAccess !== false,
-    excludeTmpdirEnvVar: false,
-    excludeSlashTmp: false
-  };
-}
+import { buildCodexSandboxPolicy, repoRoot } from './codex-settings.js';
 
 function buildChatInstructions(agent) {
   return [
@@ -117,7 +103,7 @@ export class ChatService {
         agentId: agent.id,
         model: this.config.codexModel || null,
         approvalPolicy: this.config.codexApprovalPolicy || 'never',
-        sandboxPolicy: buildSandboxPolicy(this.config),
+        sandboxPolicy: buildCodexSandboxPolicy(this.config),
         developerInstructions: buildChatInstructions(agent)
       }
     });
@@ -157,7 +143,7 @@ export class ChatService {
       metadata: {
         cwd: this.config.codexCwd || repoRoot,
         approvalPolicy: this.config.codexApprovalPolicy || 'never',
-        sandboxPolicy: buildSandboxPolicy(this.config),
+        sandboxPolicy: buildCodexSandboxPolicy(this.config),
         model: this.config.codexModel || null,
         ...metadata
       }

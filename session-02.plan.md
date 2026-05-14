@@ -263,6 +263,8 @@ When revisited later, voice should consume the shared runtime rather than introd
 ## Risks / Constraints
 
 - `codex app-server` still cannot be started inside the current Codex sandbox in this environment; it requires writable Codex home/config state outside the sandbox.
+- On Ubuntu 24+, AppArmor can block `bwrap` user namespace setup and cause Codex `workspace-write` shell access to fail with `bwrap: setting up uid map: Permission denied`.
+- One working host fix is to add `/etc/apparmor.d/bwrap` with an unconfined `bwrap` profile that allows `userns`, then restart AppArmor.
 - The backend tests are deterministic and fake-server based, but they do not replace a real local smoke test against an actual `codex app-server`.
 - The API currently imports the runtime package through a direct workspace path:
   - `../../../packages/agent-runtime/src/index.js`

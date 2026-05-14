@@ -1,3 +1,5 @@
+import { parseWritableRoots, repoRoot } from './codex-settings.js';
+
 export const config = {
   apiPort: Number(process.env.PORT || 3001),
   apiHost: process.env.HOST || '127.0.0.1',
@@ -8,10 +10,11 @@ export const config = {
   voiceHealthUrl: process.env.VOICE_HEALTH_URL || 'http://127.0.0.1:8000/health',
   maxTurnBytes: Number(process.env.MAX_TURN_BYTES || 1024 * 1024 * 8),
   codexBinary: process.env.CODEX_BINARY || 'codex',
-  codexCwd: process.env.CODEX_CWD || process.cwd(),
+  codexCwd: process.env.CODEX_CWD || repoRoot,
   codexModel: process.env.CODEX_MODEL || '',
   codexApprovalPolicy: process.env.CODEX_APPROVAL_POLICY || 'never',
   codexSandboxMode: process.env.CODEX_SANDBOX_MODE || 'workspace-write',
+  codexWritableRoots: parseWritableRoots(process.env.CODEX_WRITABLE_ROOTS),
   codexNetworkAccess: process.env.CODEX_NETWORK_ACCESS !== 'false',
   codexTurnTimeoutMs: Number(process.env.CODEX_TURN_TIMEOUT_MS || 30000)
 };

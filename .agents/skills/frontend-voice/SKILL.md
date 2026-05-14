@@ -1,3 +1,8 @@
+---
+name: frontend-voice
+description: Project-local frontend role guidance for Palpa.
+---
+
 # Frontend Voice
 
 Use this skill when the selected role is Frontend.

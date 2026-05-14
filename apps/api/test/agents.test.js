@@ -27,6 +27,11 @@ test('fallback reply includes provider metadata and voice split', () => {
   assert.equal(reply.provider, 'codex-fallback');
   assert.equal(reply.mode, 'fallback');
   assert.equal(reply.threadId, null);
+  assert.equal(reply.shouldSpeak, true);
+  assert.equal(reply.deliveryMode, 'voice_and_visual');
   assert.match(reply.spokenText, /Frontend fallback:/);
   assert.match(reply.artifactText, /codex unavailable/);
+  assert.equal(reply.artifact.text, reply.artifactText);
+  assert.deepEqual(reply.artifact.filesTouched, []);
+  assert.ok(reply.nextAgentSuggestions.length >= 1);
 });

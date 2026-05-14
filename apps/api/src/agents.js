@@ -42,11 +42,44 @@ const repoSkillRegistry = [
 const replyOutputSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['spoken_text', 'artifact_text', 'topics'],
+  required: ['spoken_text', 'should_speak', 'delivery_mode', 'artifact', 'topics', 'next_agent_suggestions'],
   properties: {
     spoken_text: { type: 'string' },
-    artifact_text: { type: 'string' },
+    should_speak: { type: 'boolean' },
+    delivery_mode: {
+      type: 'string',
+      enum: ['voice', 'visual', 'voice_and_visual']
+    },
+    artifact: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['text', 'render_mode', 'files_touched', 'commands_run', 'tool_activity', 'diff_summary'],
+      properties: {
+        text: { type: 'string' },
+        render_mode: {
+          type: 'string',
+          enum: ['plain_text', 'markdown', 'checklist']
+        },
+        files_touched: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        commands_run: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        tool_activity: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        diff_summary: { type: 'string' }
+      }
+    },
     topics: {
+      type: 'array',
+      items: { type: 'string' }
+    },
+    next_agent_suggestions: {
       type: 'array',
       items: { type: 'string' }
     }
@@ -194,14 +227,41 @@ function extractJsonObject(text) {
 function parseStructuredReply(text) {
   const parsed = JSON.parse(extractJsonObject(text));
 
-  if (typeof parsed.spoken_text !== 'string' || typeof parsed.artifact_text !== 'string' || !Array.isArray(parsed.topics)) {
+  const artifact = parsed.artifact && typeof parsed.artifact === 'object'
+    ? parsed.artifact
+    : {
+        text: typeof parsed.artifact_text === 'string' ? parsed.artifact_text : '',
+        render_mode: 'plain_text',
+        files_touched: [],
+        commands_run: [],
+        tool_activity: [],
+        diff_summary: ''
+      };
+
+  if (
+    typeof parsed.spoken_text !== 'string'
+    || typeof artifact.text !== 'string'
+    || !Array.isArray(parsed.topics)
+  ) {
     throw new Error('Codex reply did not match the expected voice schema.');
   }
 
   return {
     spokenText: parsed.spoken_text.trim(),
-    artifactText: parsed.artifact_text.trim(),
-    topics: parsed.topics.map((topic) => String(topic))
+    shouldSpeak: parsed.should_speak !== false,
+    deliveryMode: parsed.delivery_mode || 'voice_and_visual',
+    artifact: {
+      text: artifact.text.trim(),
+      renderMode: artifact.render_mode || 'plain_text',
+      filesTouched: Array.isArray(artifact.files_touched) ? artifact.files_touched.map((value) => String(value)) : [],
+      commandsRun: Array.isArray(artifact.commands_run) ? artifact.commands_run.map((value) => String(value)) : [],
+      toolActivity: Array.isArray(artifact.tool_activity) ? artifact.tool_activity.map((value) => String(value)) : [],
+      diffSummary: typeof artifact.diff_summary === 'string' ? artifact.diff_summary.trim() : ''
+    },
+    topics: parsed.topics.map((topic) => String(topic)),
+    nextAgentSuggestions: Array.isArray(parsed.next_agent_suggestions)
+      ? parsed.next_agent_suggestions.map((value) => String(value))
+      : []
   };
 }
 
@@ -235,6 +295,10 @@ export function listAgents() {
   }));
 }
 
+export function listAgentIds() {
+  return agentRegistry.map((agent) => agent.id);
+}
+
 export function resolveAgent(agentId) {
   return agentMap.get(agentId) || agentRegistry[0];
 }
@@ -252,18 +316,30 @@ export async function codexRoutingConfigured(config = {}) {
 export function createFallbackAgentReply({ targetAgentId, transcript, error }) {
   const agent = resolveAgent(targetAgentId);
   const topics = fallbackTopics(transcript);
+  const artifactText = [
+    `Fallback role: ${agent.name}`,
+    `Transcript: ${transcript || 'No transcript captured.'}`,
+    `Reason: ${error || 'Unknown Codex runtime error.'}`,
+    `Repo: ${repoRoot}`
+  ].join('\n\n');
 
   return {
     gateway: gatewayAgent,
     agent,
     spokenText: `${agent.name} fallback: I could not reach the local Codex runtime, so this reply is a local placeholder for the ${agent.role.toLowerCase()} role.`,
-    artifactText: [
-      `Fallback role: ${agent.name}`,
-      `Transcript: ${transcript || 'No transcript captured.'}`,
-      `Reason: ${error || 'Unknown Codex runtime error.'}`,
-      `Repo: ${repoRoot}`
-    ].join('\n\n'),
+    shouldSpeak: true,
+    deliveryMode: 'voice_and_visual',
+    artifact: {
+      text: artifactText,
+      renderMode: 'plain_text',
+      filesTouched: [],
+      commandsRun: [],
+      toolActivity: [],
+      diffSummary: ''
+    },
+    artifactText,
     topics,
+    nextAgentSuggestions: listAgentIds(),
     provider: 'codex-fallback',
     mode: 'fallback',
     warning: error || null,
@@ -329,8 +405,12 @@ function buildTurnPrompt(agent, transcript) {
     `Selected role: ${agent.name}`,
     `Transcript from the human: ${transcript}`,
     'Reply as the selected role.',
-    'Keep spoken_text short and natural for TTS.',
-    'Put denser implementation detail in artifact_text.',
+    'The supervisor manages the floor, but this selected role owns the current answer.',
+    'If the answer should be spoken, keep spoken_text short and natural for TTS.',
+    'If the answer should not be spoken, set should_speak to false and keep spoken_text empty or minimal.',
+    'Put denser implementation detail in artifact.text.',
+    'Use next_agent_suggestions to name which specialist ids would make sense to call next.',
+    `Valid next agent ids: ${listAgentIds().join(', ')}.`,
     'Use topics to label the main areas of concern.'
   ].join('\n\n');
 }
@@ -342,6 +422,123 @@ function buildSandboxPolicy(config) {
     networkAccess: config.codexNetworkAccess !== false,
     excludeTmpdirEnvVar: false,
     excludeSlashTmp: false
+  };
+}
+
+function mapCodexStageFromStatus(status) {
+  switch (status) {
+    case 'running':
+      return 'thinking';
+    case 'completed':
+      return 'reply_ready';
+    case 'failed':
+    case 'error':
+      return 'failed';
+    default:
+      return null;
+  }
+}
+
+function buildRuntimeEvent(message, { threadId, turnId }) {
+  const params = message.params || {};
+
+  if (message.method === 'item/agentMessage/delta') {
+    return {
+      type: 'activity',
+      stage: 'thinking',
+      activity: {
+        kind: 'agent_message_delta',
+        text: params.delta || params.text || '',
+        item_id: params.itemId || params.item_id || null
+      }
+    };
+  }
+
+  if (message.method === 'item/commandExecution/outputDelta') {
+    return {
+      type: 'activity',
+      stage: 'tool_running',
+      activity: {
+        kind: 'command_output',
+        command: params.command || null,
+        output: params.outputDelta || params.delta || '',
+        exit_code: params.exitCode ?? null
+      }
+    };
+  }
+
+  if (message.method === 'item/fileChange/patchUpdated') {
+    return {
+      type: 'activity',
+      stage: 'editing',
+      activity: {
+        kind: 'file_change',
+        path: params.path || params.filePath || null,
+        patch: params.patch || params.patchSummary || ''
+      }
+    };
+  }
+
+  if (message.method === 'item/mcpToolCall/progress') {
+    return {
+      type: 'activity',
+      stage: 'tool_running',
+      activity: {
+        kind: 'mcp_tool_progress',
+        tool_name: params.toolName || params.name || null,
+        status: params.status || null,
+        detail: params.message || params.detail || ''
+      }
+    };
+  }
+
+  if (message.method === 'turn/plan/updated') {
+    return {
+      type: 'activity',
+      stage: 'thinking',
+      activity: {
+        kind: 'plan_update',
+        plan: params.plan || [],
+        explanation: params.explanation || ''
+      }
+    };
+  }
+
+  if (message.method === 'thread/status/changed') {
+    const stage = mapCodexStageFromStatus(params.status);
+    if (!stage) {
+      return null;
+    }
+
+    return {
+      type: 'stage',
+      stage,
+      status: params.status
+    };
+  }
+
+  if (message.method === 'turn/completed') {
+    return {
+      type: 'stage',
+      stage: 'reply_ready'
+    };
+  }
+
+  if (message.method === 'error') {
+    return {
+      type: 'stage',
+      stage: 'failed',
+      error: params.message || 'Codex app-server reported an error.'
+    };
+  }
+
+  return {
+    type: 'activity',
+    activity: {
+      kind: 'notification',
+      method: message.method,
+      detail: JSON.stringify(params)
+    }
   };
 }
 
@@ -392,12 +589,64 @@ function findTurn(turns, turnId) {
   return (turns || []).find((turn) => turn.id === turnId) || null;
 }
 
-function extractFinalAgentMessage(turn) {
-  const messages = (turn?.items || []).filter((item) => item.type === 'agentMessage' && item.text?.trim());
-  return messages.length ? messages.at(-1).text.trim() : '';
+function readTextFragments(value, fragments = []) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed) {
+      fragments.push(trimmed);
+    }
+    return fragments;
+  }
+
+  if (!value || typeof value !== 'object') {
+    return fragments;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      readTextFragments(entry, fragments);
+    }
+    return fragments;
+  }
+
+  for (const key of ['text', 'value', 'output_text', 'content', 'contents', 'parts', 'message']) {
+    if (key in value) {
+      readTextFragments(value[key], fragments);
+    }
+  }
+
+  return fragments;
 }
 
-async function waitForTurnCompleted(client, { threadId, turnId, timeoutMs = 30000 }) {
+function extractFinalAgentMessage(turn) {
+  const items = turn?.items || turn?.output || turn?.outputs || [];
+  const candidates = [];
+
+  for (const item of items) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+
+    const itemType = item.type || item.role || null;
+    if (itemType && !['agentMessage', 'message', 'assistant'].includes(itemType)) {
+      continue;
+    }
+
+    const fragments = readTextFragments(item);
+    if (fragments.length) {
+      candidates.push(fragments.join('\n').trim());
+    }
+  }
+
+  if (candidates.length) {
+    return candidates.at(-1) || '';
+  }
+
+  const turnFragments = readTextFragments(turn?.result || turn?.response || turn?.message || null);
+  return turnFragments.length ? turnFragments.join('\n').trim() : '';
+}
+
+async function waitForTurnCompleted(client, { threadId, turnId, timeoutMs = 30000, onEvent }) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       unsubscribe();
@@ -405,6 +654,11 @@ async function waitForTurnCompleted(client, { threadId, turnId, timeoutMs = 3000
     }, timeoutMs);
 
     const unsubscribe = client.onNotification((message) => {
+      const event = buildRuntimeEvent(message, { threadId, turnId });
+      if (event) {
+        onEvent?.(event);
+      }
+
       if (message.method === 'turn/completed' && message.params.threadId === threadId && message.params.turn.id === turnId) {
         clearTimeout(timer);
         unsubscribe();
@@ -420,12 +674,23 @@ async function waitForTurnCompleted(client, { threadId, turnId, timeoutMs = 3000
   });
 }
 
-export async function generateAgentReply({ sessionState, targetAgentId, transcript, config = {} }) {
+export async function generateAgentReply({ sessionState, targetAgentId, transcript, config = {}, onEvent }) {
   try {
     const client = getClient(config);
     const agent = resolveAgent(targetAgentId);
+    onEvent?.({ type: 'stage', stage: 'routing' });
     const threadId = await ensureRoleThread({ client, sessionState, targetAgentId: agent.id, config });
     const skillsUsed = buildSkillInputs(agent.id, sessionState);
+    onEvent?.({
+      type: 'activity',
+      stage: 'routing',
+      activity: {
+        kind: 'skill_attachment',
+        skills: skillsUsed.map((skill) => skill.name),
+        thread_id: threadId
+      }
+    });
+
     const response = await client.sendRequest('turn/start', {
       threadId,
       input: [
@@ -443,28 +708,48 @@ export async function generateAgentReply({ sessionState, targetAgentId, transcri
       personality: 'pragmatic',
       outputSchema: replyOutputSchema
     });
+    onEvent?.({
+      type: 'stage',
+      stage: 'thinking',
+      threadId,
+      turnId: response.turn.id
+    });
 
-    await waitForTurnCompleted(client, {
+    const completedTurnFromNotification = await waitForTurnCompleted(client, {
       threadId,
       turnId: response.turn.id,
-      timeoutMs: config.codexTurnTimeoutMs || 30000
+      timeoutMs: config.codexTurnTimeoutMs || 30000,
+      onEvent: (event) => onEvent?.({
+        ...event,
+        threadId,
+        turnId: response.turn.id
+      })
     });
 
-    const threadRead = await client.sendRequest('thread/read', {
-      threadId,
-      includeTurns: true
-    });
+    let messageText = extractFinalAgentMessage(completedTurnFromNotification);
 
-    const completedTurn = findTurn(threadRead.thread.turns, response.turn.id);
-    const messageText = extractFinalAgentMessage(completedTurn);
+    if (!messageText) {
+      const threadRead = await client.sendRequest('thread/read', {
+        threadId,
+        includeTurns: true
+      });
+
+      const completedTurn = findTurn(threadRead.thread.turns, response.turn.id);
+      messageText = extractFinalAgentMessage(completedTurn);
+    }
+
     const structured = parseStructuredReply(messageText);
 
     return {
       gateway: gatewayAgent,
       agent,
       spokenText: structured.spokenText,
-      artifactText: structured.artifactText,
+      shouldSpeak: structured.shouldSpeak,
+      deliveryMode: structured.deliveryMode,
+      artifact: structured.artifact,
+      artifactText: structured.artifact.text,
       topics: structured.topics,
+      nextAgentSuggestions: structured.nextAgentSuggestions.filter((agentId) => agentMap.has(agentId)),
       provider: 'codex-app-server',
       mode: 'live',
       warning: null,
@@ -472,6 +757,11 @@ export async function generateAgentReply({ sessionState, targetAgentId, transcri
       skillsUsed: skillsUsed.map((skill) => skill.name)
     };
   } catch (error) {
+    onEvent?.({
+      type: 'stage',
+      stage: 'failed',
+      error: error instanceof Error ? error.message : 'Codex runtime error.'
+    });
     return createFallbackAgentReply({
       targetAgentId,
       transcript,

@@ -70,17 +70,39 @@ function base64ToInt16(base64) {
   return new Int16Array(bytes.buffer);
 }
 
+function formatActivityPayload(item) {
+  const payload = {
+    kind: item.kind || null,
+    command: item.command || null,
+    tool_name: item.tool_name || null,
+    path: item.path || null,
+    status: item.status || null,
+    text: item.text || null,
+    output: item.output || null,
+    detail: item.detail || null,
+    thread_id: item.thread_id || null,
+    codex_turn_id: item.codex_turn_id || null
+  };
+
+  return JSON.stringify(
+    Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== null && value !== '')),
+    null,
+    2
+  );
+}
+
 export default function Home() {
   const [connectionState, setConnectionState] = useState('connecting');
   const [session, setSession] = useState(null);
   const [agents, setAgents] = useState([]);
-  const [skills, setSkills] = useState([]);
-  const [apps, setApps] = useState([]);
+  const [floor, setFloor] = useState(null);
   const [selectedAgentId, setSelectedAgentId] = useState('architect');
   const [turn, setTurn] = useState(null);
   const [partialTranscript, setPartialTranscript] = useState('');
   const [finalTranscript, setFinalTranscript] = useState('');
   const [reply, setReply] = useState(null);
+  const [agentStage, setAgentStage] = useState(null);
+  const [agentActivity, setAgentActivity] = useState([]);
   const [error, setError] = useState('');
   const [status, setStatus] = useState(idleStatus);
   const [isRecording, setIsRecording] = useState(false);
@@ -124,8 +146,7 @@ export default function Home() {
       if (message.type === 'session.started') {
         setSession(message);
         setAgents(message.agents || []);
-        setSkills(message.skills || []);
-        setApps(message.apps || []);
+        setFloor(message.floor || null);
         if (message.agents?.length) {
           setSelectedAgentId((current) => (
             message.agents.some((agent) => agent.id === current) ? current : message.agents[0].id
@@ -137,6 +158,8 @@ export default function Home() {
       if (message.type === 'turn.started') {
         turnIdRef.current = message.turn_id;
         setTurn(message);
+        setAgentStage(null);
+        setAgentActivity([]);
         setStatus(`Turn ${message.turn_id} recording for ${message.target_agent_id}.`);
       }
 
@@ -168,14 +191,29 @@ export default function Home() {
           mode: message.mode,
           warning: message.warning,
           thread_id: message.thread_id,
-          skills_used: message.skills_used || []
+          skills_used: message.skills_used || [],
+          should_speak: message.should_speak,
+          delivery_mode: message.delivery_mode,
+          artifact: message.artifact || null,
+          next_agent_suggestions: message.next_agent_suggestions || [],
+          floor: message.floor || null
         }));
+        setFloor(message.floor || null);
         setStatus(`Reply selected: ${message.agent_name}.`);
+      }
+
+      if (message.type === 'agent.stage') {
+        setAgentStage(message);
+        setStatus(`Agent stage: ${message.stage}.`);
+      }
+
+      if (message.type === 'agent.activity') {
+        setAgentActivity((current) => [message, ...current].slice(0, 12));
       }
 
       if (message.type === 'reply.ready') {
         playbackCursorRef.current = 0;
-        setStatus('Synthesized audio stream starting.');
+        setStatus(message.should_speak ? 'Synthesized audio stream starting.' : 'Rendered reply ready.');
       }
 
       if (message.type === 'reply.audio_chunk') {
@@ -330,6 +368,8 @@ export default function Home() {
   async function startRecording() {
     setError('');
     setReply(null);
+    setAgentStage(null);
+    setAgentActivity([]);
     setFinalTranscript('');
     setPartialTranscript('');
     playbackCursorRef.current = 0;
@@ -375,25 +415,83 @@ export default function Home() {
     setStatus('Finalizing turn...');
   }
 
+  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || null;
+  const callableAgentIds = reply?.floor?.next_agent_ids || floor?.next_agent_ids || agents.map((agent) => agent.id);
+  const suggestedNextAgentIds = reply?.next_agent_suggestions?.length ? reply.next_agent_suggestions : callableAgentIds;
+
+  function agentById(agentId) {
+    return agents.find((agent) => agent.id === agentId) || null;
+  }
+
   return (
     <main className="shell">
       <section className="hero">
         <p className="eyebrow">Palpa Voice Slice 1</p>
-        <h1>Human speech in, transcript events out, role-attributed voice back.</h1>
+        <h1>Supervisor-managed voice turns, simple specialist handoff.</h1>
         <p className="lede">
-          One active session, one active turn, and one most-recent reply. The browser only owns capture,
-          rendering, and playback.
+          The supervisor manages the floor. You see which specialists are available, who is active now,
+          and whether the latest response should be spoken or just rendered.
         </p>
       </section>
 
       <section className="grid">
         <article className="panel">
-          <h2>Session</h2>
+          <h2>Floor</h2>
           <dl className="facts">
+            <div>
+              <dt>Supervisor</dt>
+              <dd>{session?.gateway?.name || 'Pending'}</dd>
+            </div>
+            <div>
+              <dt>Role</dt>
+              <dd>{session?.gateway?.role || 'Pending'}</dd>
+            </div>
+            <div>
+              <dt>Active agent</dt>
+              <dd>{agentById(floor?.active_agent_id)?.name || 'None'}</dd>
+            </div>
             <div>
               <dt>Transport</dt>
               <dd>{connectionState}</dd>
             </div>
+            <div>
+              <dt>Mic</dt>
+              <dd>{micReady ? 'Ready' : 'Not granted'}</dd>
+            </div>
+          </dl>
+          <p className="status">{status}</p>
+          {error ? <p className="error">{error}</p> : null}
+          {session?.warning ? <p className="error">{session.warning}</p> : null}
+          <div className="selectorGroup">
+            <span className="fieldLabel">Available agents</span>
+            <div className="agentList">
+              {agents.map((agent) => (
+                <button
+                  key={agent.id}
+                  type="button"
+                  className={`agentChip ${selectedAgentId === agent.id ? 'isActive' : ''}`}
+                  onClick={() => setSelectedAgentId(agent.id)}
+                  disabled={isRecording}
+                >
+                  <strong>{agent.name}</strong>
+                  <span>{agent.role}</span>
+                </button>
+              ))}
+            </div>
+            <p className="helperText">
+              The supervisor controls the floor. You choose the next specialist to call.
+            </p>
+          </div>
+          <div className="controls">
+            <button className="primary" onClick={isRecording ? stopRecording : startRecording} disabled={connectionState !== 'connected'}>
+              {isRecording ? `Stop ${selectedAgent?.name || 'Turn'}` : `Call ${selectedAgent?.name || 'Agent'}`}
+            </button>
+          </div>
+        </article>
+
+        <article className="panel">
+          <h2>Current turn</h2>
+          <dl className="facts">
             <div>
               <dt>Session</dt>
               <dd>{session?.session_id || 'Pending'}</dd>
@@ -403,49 +501,10 @@ export default function Home() {
               <dd>{turn?.turn_id || 'Idle'}</dd>
             </div>
             <div>
-              <dt>Mic</dt>
-              <dd>{micReady ? 'Ready' : 'Not granted'}</dd>
-            </div>
-            <div>
-              <dt>Agent</dt>
-              <dd>{selectedAgentId}</dd>
-            </div>
-            <div>
-              <dt>Skills</dt>
-              <dd>{skills.length}</dd>
-            </div>
-            <div>
-              <dt>Apps</dt>
-              <dd>{apps.length}</dd>
+              <dt>Selected</dt>
+              <dd>{selectedAgent?.name || selectedAgentId}</dd>
             </div>
           </dl>
-          <p className="status">{status}</p>
-          {error ? <p className="error">{error}</p> : null}
-          {session?.warning ? <p className="error">{session.warning}</p> : null}
-          <div className="selectorGroup">
-            <label className="fieldLabel" htmlFor="agent-select">
-              Voice target
-            </label>
-            <select id="agent-select" value={selectedAgentId} onChange={(event) => setSelectedAgentId(event.target.value)} disabled={isRecording || !agents.length}>
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name} · {agent.role}
-                </option>
-              ))}
-            </select>
-            <p className="helperText">
-              The gateway keeps routing explicit for now. You choose which specialist receives the turn.
-            </p>
-          </div>
-          <div className="controls">
-            <button className="primary" onClick={isRecording ? stopRecording : startRecording} disabled={connectionState !== 'connected'}>
-              {isRecording ? 'Stop Turn' : 'Push To Talk'}
-            </button>
-          </div>
-        </article>
-
-        <article className="panel">
-          <h2>Transcript</h2>
           <div className="transcriptBlock">
             <h3>Live partial</h3>
             <p>{partialTranscript || 'Waiting for provisional transcript...'}</p>
@@ -460,48 +519,128 @@ export default function Home() {
           <h2>Reply</h2>
           <dl className="facts">
             <div>
-              <dt>Gateway</dt>
-              <dd>{reply?.gateway_name || session?.gateway?.name || 'Pending'}</dd>
-            </div>
-            <div>
-              <dt>Agent</dt>
+              <dt>From</dt>
               <dd>{reply?.agent_name || 'Pending'}</dd>
             </div>
             <div>
-              <dt>Role</dt>
-              <dd>{reply?.agent_role || 'Pending'}</dd>
+              <dt>Delivery</dt>
+              <dd>{reply?.delivery_mode || 'Pending'}</dd>
             </div>
             <div>
-              <dt>Voice</dt>
-              <dd>{reply?.voice_id || 'Pending'}</dd>
+              <dt>Read aloud</dt>
+              <dd>{reply ? (reply.should_speak ? 'Yes' : 'No') : 'Pending'}</dd>
             </div>
             <div>
-              <dt>Mode</dt>
-              <dd>{reply?.mode || 'Pending'}</dd>
+              <dt>Next call</dt>
+              <dd>{suggestedNextAgentIds.map((agentId) => agentById(agentId)?.name || agentId).join(', ') || 'Pending'}</dd>
+            </div>
+          </dl>
+          {reply?.should_speak ? (
+            <div className="transcriptBlock">
+              <h3>Spoken</h3>
+              <p className="replyText">{reply?.spoken_text || 'The spoken reply will land here.'}</p>
+            </div>
+          ) : null}
+          <div className="transcriptBlock">
+            <h3>Rendered</h3>
+            <p className="replyText artifactText">{reply?.artifact?.text || reply?.artifact_text || 'The rendered artifact will land here.'}</p>
+          </div>
+          {reply?.artifact?.files_touched?.length ? (
+            <div className="transcriptBlock">
+              <h3>Files touched</h3>
+              <ul className="activityList">
+                {reply.artifact.files_touched.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+          ) : null}
+          {reply?.artifact?.commands_run?.length ? (
+            <div className="transcriptBlock">
+              <h3>Commands run</h3>
+              <ul className="activityList">
+                {reply.artifact.commands_run.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+          ) : null}
+          {reply?.artifact?.tool_activity?.length ? (
+            <div className="transcriptBlock">
+              <h3>Tool activity</h3>
+              <ul className="activityList">
+                {reply.artifact.tool_activity.map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+          ) : null}
+          {reply?.artifact?.diff_summary ? (
+            <div className="transcriptBlock">
+              <h3>Diff summary</h3>
+              <p>{reply.artifact.diff_summary}</p>
+            </div>
+          ) : null}
+          {reply?.warning ? <p className="error">{reply.warning}</p> : null}
+          <p className="status">{reply?.should_speak ? 'This reply is being read aloud and rendered.' : 'This reply is render-only.'}</p>
+        </article>
+
+        <article className="panel">
+          <h2>Next agents</h2>
+          <dl className="facts">
+            <div>
+              <dt>Supervisor</dt>
+              <dd>{floor?.supervisor_name || session?.gateway?.name || 'Pending'}</dd>
             </div>
             <div>
-              <dt>Provider</dt>
-              <dd>{reply?.provider || 'Pending'}</dd>
+              <dt>Stage</dt>
+              <dd>{agentStage?.stage || 'Idle'}</dd>
             </div>
             <div>
               <dt>Thread</dt>
-              <dd>{reply?.thread_id || 'Pending'}</dd>
+              <dd>{agentStage?.thread_id || reply?.thread_id || 'Pending'}</dd>
+            </div>
+            <div>
+              <dt>Codex turn</dt>
+              <dd>{agentStage?.codex_turn_id || 'Pending'}</dd>
             </div>
           </dl>
           <div className="transcriptBlock">
-            <h3>Spoken reply</h3>
-            <p className="replyText">{reply?.spoken_text || 'The TTS-safe spoken reply will land here.'}</p>
+            <h3>Call next</h3>
+            <div className="agentList">
+              {suggestedNextAgentIds.map((agentId) => {
+                const agent = agentById(agentId);
+                if (!agent) {
+                  return null;
+                }
+
+                return (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    className={`agentChip ${selectedAgentId === agent.id ? 'isActive' : ''}`}
+                    onClick={() => setSelectedAgentId(agent.id)}
+                    disabled={isRecording}
+                  >
+                    <strong>{agent.name}</strong>
+                    <span>{agent.role}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
           <div className="transcriptBlock">
-            <h3>Artifact text</h3>
-            <p className="replyText artifactText">{reply?.artifact_text || 'The richer artifact text will render here separately from speech.'}</p>
+            <h3>Recent activity</h3>
+            {agentActivity.length ? (
+              <ul className="activityList">
+                {agentActivity.map((item, index) => (
+                  <li key={`${item.timestamp}-${index}`}>
+                    <strong>{item.kind || 'activity'}</strong>
+                    <pre className="codeBlock">
+                      <code>{formatActivityPayload(item)}</code>
+                    </pre>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>No live agent activity has been emitted for this turn yet.</p>
+            )}
           </div>
-          <div className="transcriptBlock">
-            <h3>Skills used</h3>
-            <p>{reply?.skills_used?.length ? reply.skills_used.join(', ') : 'No explicit repo skill attachments were used for this turn.'}</p>
-          </div>
-          {reply?.warning ? <p className="error">{reply.warning}</p> : null}
-          <p className="status">Playback is streamed progressively over Web Audio.</p>
+          {agentStage?.error ? <p className="error">{agentStage.error}</p> : null}
         </article>
       </section>
     </main>

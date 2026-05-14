@@ -39,6 +39,23 @@ This session moves beyond mock/local placeholder role replies and proves that th
   - `mode`
   - `thread_id`
   - `skills_used`
+- Added live agent runtime websocket events in the API:
+  - `agent.stage`
+  - `agent.activity`
+- Mapped Codex runtime notifications into Palpa-oriented execution stages and activity summaries.
+- Extended the browser client to render:
+  - current agent stage
+  - recent runtime activity
+  - Codex turn metadata during a live turn
+- Expanded the role reply contract beyond plain artifact text so replies now carry:
+  - delivery metadata (`should_speak`, `delivery_mode`)
+  - structured artifact fields
+  - next-agent suggestions for supervisor-managed floor flow
+- Simplified the browser UI around:
+  - supervisor/floor visibility
+  - available specialists
+  - next-call choices
+  - spoken-vs-rendered response handling
 - Added repo-local Codex skills for dogfooding:
   - `.agents/skills/voice-mode`
   - `.agents/skills/architect-voice`
@@ -94,19 +111,19 @@ This session moves beyond mock/local placeholder role replies and proves that th
 
 ### 2. Real artifact work contract
 
-- Evolve the Codex turn contract beyond plain `artifact_text`.
-- Add a structured artifact payload that the browser can render, for example:
-  - `artifact_text`
-  - `files_touched`
-  - `commands_run`
-  - `tool_activity`
-  - `diff_summary`
+- Keep evolving the structured artifact payload now that the API/browser contract includes:
+  - `artifact.text`
+  - `artifact.files_touched`
+  - `artifact.commands_run`
+  - `artifact.tool_activity`
+  - `artifact.diff_summary`
 - Keep `spoken_text` optimized for human conversation and separate from execution evidence.
+- Improve how reliably live Codex turns populate those structured artifact fields, not just fallback/default values.
 
 ### 3. Agent execution state management
 
-- Introduce explicit Codex/agent stage reporting in the API.
-- Map Codex runtime notifications into a Palpa state model such as:
+- Extend the current stage model as needed. The API now emits explicit `agent.stage` updates and basic runtime activity.
+- Continue refining the stage mapping around states such as:
   - `bootstrapping`
   - `discovering_skills`
   - `routing`
@@ -115,12 +132,11 @@ This session moves beyond mock/local placeholder role replies and proves that th
   - `editing`
   - `reply_ready`
   - `failed`
-- Surface these state transitions to the browser over the existing websocket.
-- Preserve the current voice turn lifecycle while adding a nested agent execution lifecycle.
+- Preserve the current voice turn lifecycle while refining the nested agent execution lifecycle.
 
 ### 4. Better handling of Codex runtime notifications
 
-- Capture and expose:
+- Expand the current notification mapping so it captures and exposes richer payloads for:
   - `item/agentMessage/delta`
   - `item/commandExecution/outputDelta`
   - `item/fileChange/patchUpdated`
@@ -131,13 +147,12 @@ This session moves beyond mock/local placeholder role replies and proves that th
 
 ### 5. Tool and artifact rendering in the client
 
-- Add browser panels for:
-  - current agent state
-  - commands being executed
-  - files changed / diff summary
-  - Codex thread id / provider metadata
-  - attached skills used for the turn
-- Keep spoken reply visually distinct from execution/output artifacts.
+- Keep the client simple, but continue improving:
+  - current floor/supervisor visibility
+  - next-call affordances
+  - files changed / diff summary rendering
+  - commands/tool activity rendering
+  - spoken reply separation from rendered artifacts
 
 ## Proposed Implementation Order
 

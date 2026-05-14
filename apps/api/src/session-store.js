@@ -1,5 +1,5 @@
 import { createEvent } from './events.js';
-import { discoverCodexWorkspace, generateAgentReply, gatewayAgent, listAgents } from './agents.js';
+import { discoverCodexWorkspace, generateAgentReply, gatewayAgent, listAgentIds, listAgents } from './agents.js';
 import { createVoiceAsrClient, synthesizeVoiceStream } from './voice-client.js';
 
 function sessionMessage(type, payload) {
@@ -16,6 +16,26 @@ function buildSessionId(random = Math.random) {
 
 function buildTurnId(random = Math.random) {
   return `turn_${Math.floor(random() * 1e9).toString(36)}`;
+}
+
+function buildFloorState({ activeAgentId = null } = {}) {
+  return {
+    supervisor_id: gatewayAgent.id,
+    supervisor_name: gatewayAgent.name,
+    active_agent_id: activeAgentId,
+    available_agent_ids: listAgentIds(),
+    next_agent_ids: listAgentIds()
+  };
+}
+
+function createEmptyAgentExecution(targetAgentId) {
+  return {
+    targetAgentId,
+    stage: 'idle',
+    threadId: null,
+    turnId: null,
+    activities: []
+  };
 }
 
 export class SessionStore {
@@ -80,6 +100,7 @@ export class SessionStore {
           summary: gatewayAgent.summary
         },
         agents: listAgents(),
+        floor: buildFloorState(),
         codex: bootstrap.codex,
         skills: bootstrap.skills,
         apps: bootstrap.apps,
@@ -117,7 +138,8 @@ export class SessionStore {
       startedAt: Date.now(),
       finalTranscript: '',
       partialTranscript: '',
-      targetAgentId: targetAgentId || 'architect'
+      targetAgentId: targetAgentId || 'architect',
+      agentExecution: createEmptyAgentExecution(targetAgentId || 'architect')
     };
 
     session.currentTurn = turn;
@@ -247,11 +269,17 @@ export class SessionStore {
 
   async generateReply(session, turn) {
     turn.state = 'reply_generating';
+    this.publishAgentStage(session, turn, {
+      stage: 'routing',
+      target_agent_id: turn.targetAgentId
+    });
+
     const selection = await this.agentReplyFactory({
       sessionState: session.agentState,
       targetAgentId: turn.targetAgentId,
       transcript: turn.finalTranscript,
-      config: this.config
+      config: this.config,
+      onEvent: (event) => this.handleAgentRuntimeEvent(session, turn, event)
     });
     session.events.push(
       createEvent('voice.reply.selected', session.id, turn.id, {
@@ -262,13 +290,25 @@ export class SessionStore {
         agent_role: selection.agent.role,
         voice_id: selection.agent.voiceId,
         spoken_text: selection.spokenText,
+        should_speak: selection.shouldSpeak,
+        delivery_mode: selection.deliveryMode,
         artifact_text: selection.artifactText,
+        artifact: {
+          text: selection.artifact.text,
+          render_mode: selection.artifact.renderMode,
+          files_touched: selection.artifact.filesTouched,
+          commands_run: selection.artifact.commandsRun,
+          tool_activity: selection.artifact.toolActivity,
+          diff_summary: selection.artifact.diffSummary
+        },
         topics: selection.topics,
+        next_agent_suggestions: selection.nextAgentSuggestions,
         provider: selection.provider,
         mode: selection.mode,
         warning: selection.warning,
         thread_id: selection.threadId,
-        skills_used: selection.skillsUsed
+        skills_used: selection.skillsUsed,
+        floor: buildFloorState({ activeAgentId: selection.agent.id })
       })
     );
 
@@ -282,74 +322,99 @@ export class SessionStore {
       agent_role: selection.agent.role,
       voice_id: selection.agent.voiceId,
       spoken_text: selection.spokenText,
+      should_speak: selection.shouldSpeak,
+      delivery_mode: selection.deliveryMode,
       artifact_text: selection.artifactText,
+      artifact: {
+        text: selection.artifact.text,
+        render_mode: selection.artifact.renderMode,
+        files_touched: selection.artifact.filesTouched,
+        commands_run: selection.artifact.commandsRun,
+        tool_activity: selection.artifact.toolActivity,
+        diff_summary: selection.artifact.diffSummary
+      },
       text: selection.spokenText,
       topics: selection.topics,
+      next_agent_suggestions: selection.nextAgentSuggestions,
       provider: selection.provider,
       mode: selection.mode,
       warning: selection.warning,
       thread_id: selection.threadId,
-      skills_used: selection.skillsUsed
+      skills_used: selection.skillsUsed,
+      floor: buildFloorState({ activeAgentId: selection.agent.id })
     });
 
-    turn.state = 'synthesizing';
-
     try {
-      send(session.socket, 'reply.ready', {
-        session_id: session.id,
-        turn_id: turn.id,
-        stream: {
-          encoding: 'pcm_s16le',
-          channels: 1
-        }
-      });
-
       let durationMs = 0;
       let provider = 'unknown';
+      if (selection.shouldSpeak && selection.spokenText) {
+        turn.state = 'synthesizing';
+        send(session.socket, 'reply.ready', {
+          session_id: session.id,
+          turn_id: turn.id,
+          should_speak: true,
+          stream: {
+            encoding: 'pcm_s16le',
+            channels: 1
+          }
+        });
 
-      await this.synthesizeStream(this.config.voiceTtsStreamUrl, {
-        text: selection.spokenText,
-        voice_id: selection.agent.voiceId,
-        output_format: 'wav'
-      }, (event) => {
-        if (event.type === 'audio_chunk') {
-          send(session.socket, 'reply.audio_chunk', {
-            session_id: session.id,
-            turn_id: turn.id,
-            sequence: event.sequence,
-            audio: event.audio,
-            sample_rate_hz: event.sample_rate_hz,
-            channels: event.channels,
-            encoding: event.encoding
-          });
-          return;
-        }
-
-        if (event.type === 'audio_end') {
-          durationMs = event.duration_ms || 0;
-          provider = event.provider || provider;
-          send(session.socket, 'reply.audio_end', {
-            session_id: session.id,
-            turn_id: turn.id,
-            duration_ms: durationMs,
-            provider
-          });
-        }
-      });
-
-      session.events.push(
-        createEvent('voice.reply.synthesized', session.id, turn.id, {
-          gateway_id: selection.gateway.id,
-          agent_id: selection.agent.id,
+        await this.synthesizeStream(this.config.voiceTtsStreamUrl, {
+          text: selection.spokenText,
           voice_id: selection.agent.voiceId,
-          provider,
-          duration_ms: durationMs,
-          reply_provider: selection.provider,
-          reply_mode: selection.mode
-        })
-      );
+          output_format: 'wav'
+        }, (event) => {
+          if (event.type === 'audio_chunk') {
+            send(session.socket, 'reply.audio_chunk', {
+              session_id: session.id,
+              turn_id: turn.id,
+              sequence: event.sequence,
+              audio: event.audio,
+              sample_rate_hz: event.sample_rate_hz,
+              channels: event.channels,
+              encoding: event.encoding
+            });
+            return;
+          }
+
+          if (event.type === 'audio_end') {
+            durationMs = event.duration_ms || 0;
+            provider = event.provider || provider;
+            send(session.socket, 'reply.audio_end', {
+              session_id: session.id,
+              turn_id: turn.id,
+              duration_ms: durationMs,
+              provider
+            });
+          }
+        });
+
+        session.events.push(
+          createEvent('voice.reply.synthesized', session.id, turn.id, {
+            gateway_id: selection.gateway.id,
+            agent_id: selection.agent.id,
+            voice_id: selection.agent.voiceId,
+            provider,
+            duration_ms: durationMs,
+            reply_provider: selection.provider,
+            reply_mode: selection.mode
+          })
+        );
+      } else {
+        turn.state = 'completed';
+        send(session.socket, 'reply.ready', {
+          session_id: session.id,
+          turn_id: turn.id,
+          should_speak: false
+        });
+      }
 
       turn.state = 'completed';
+      this.publishAgentStage(session, turn, {
+        stage: 'reply_ready',
+        target_agent_id: selection.agent.id,
+        thread_id: selection.threadId
+      });
       const elapsedMs = Date.now() - turn.startedAt;
       session.events.push(createEvent('voice.turn.completed', session.id, turn.id, { elapsed_ms: elapsedMs }));
       send(session.socket, 'turn.completed', {
@@ -371,6 +436,11 @@ export class SessionStore {
     }
 
     turn.state = 'error';
+    this.publishAgentStage(session, turn, {
+      stage: 'failed',
+      target_agent_id: turn.targetAgentId,
+      error
+    });
     session.events.push(createEvent('voice.turn.failed', session.id, turn.id, { error }));
     send(session.socket, 'turn.error', {
       session_id: session.id,
@@ -391,5 +461,78 @@ export class SessionStore {
     }
 
     session.currentTurn = null;
+  }
+
+  handleAgentRuntimeEvent(session, turn, event) {
+    if (!event || !session.currentTurn || session.currentTurn.id !== turn.id) {
+      return;
+    }
+
+    if (event.type === 'stage') {
+      this.publishAgentStage(session, turn, {
+        stage: event.stage,
+        target_agent_id: turn.targetAgentId,
+        thread_id: event.threadId || turn.agentExecution.threadId || null,
+        codex_turn_id: event.turnId || turn.agentExecution.turnId || null,
+        status: event.status || null,
+        error: event.error || null
+      });
+      return;
+    }
+
+    if (event.type === 'activity') {
+      if (event.stage) {
+        this.publishAgentStage(session, turn, {
+          stage: event.stage,
+          target_agent_id: turn.targetAgentId,
+          thread_id: event.threadId || turn.agentExecution.threadId || null,
+          codex_turn_id: event.turnId || turn.agentExecution.turnId || null
+        });
+      }
+
+      this.publishAgentActivity(session, turn, {
+        target_agent_id: turn.targetAgentId,
+        thread_id: event.threadId || turn.agentExecution.threadId || null,
+        codex_turn_id: event.turnId || turn.agentExecution.turnId || null,
+        ...event.activity
+      });
+    }
+  }
+
+  publishAgentStage(session, turn, payload) {
+    turn.agentExecution.stage = payload.stage;
+    if (payload.thread_id) {
+      turn.agentExecution.threadId = payload.thread_id;
+    }
+    if (payload.codex_turn_id) {
+      turn.agentExecution.turnId = payload.codex_turn_id;
+    }
+
+    session.events.push(
+      createEvent('agent.stage.changed', session.id, turn.id, payload)
+    );
+    send(session.socket, 'agent.stage', {
+      session_id: session.id,
+      turn_id: turn.id,
+      timestamp: new Date().toISOString(),
+      ...payload
+    });
+  }
+
+  publishAgentActivity(session, turn, payload) {
+    turn.agentExecution.activities.push(payload);
+    if (turn.agentExecution.activities.length > 25) {
+      turn.agentExecution.activities = turn.agentExecution.activities.slice(-25);
+    }
+
+    session.events.push(
+      createEvent('agent.activity', session.id, turn.id, payload)
+    );
+    send(session.socket, 'agent.activity', {
+      session_id: session.id,
+      turn_id: turn.id,
+      timestamp: new Date().toISOString(),
+      ...payload
+    });
   }
 }

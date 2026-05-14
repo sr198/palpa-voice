@@ -1,3 +1,8 @@
+---
+name: voice-lead
+description: Project-local voice pipeline role guidance for Palpa.
+---
+
 # Voice Lead
 
 Use this skill when the selected role is Voice Lead.

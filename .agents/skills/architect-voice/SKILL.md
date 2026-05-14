@@ -1,3 +1,8 @@
+---
+name: architect-voice
+description: Project-local architect role guidance for Palpa.
+---
+
 # Architect Voice
 
 Use this skill when the selected role is Architect.

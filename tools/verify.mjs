@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 
 const commands = [
+  ['npm', ['run', 'test', '--workspace', 'packages/agent-runtime']],
   ['npm', ['run', 'test', '--workspace', 'apps/api']],
   ['python3', ['-m', 'unittest', 'discover', '-s', 'services/voice/tests']]
 ];

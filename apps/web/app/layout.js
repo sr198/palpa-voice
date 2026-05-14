@@ -1,14 +1,14 @@
 import './globals.css';
 
 export const metadata = {
-  title: 'Palpa Voice',
-  description: 'Voice session slice 1'
+  title: 'Palpa Studio',
+  description: 'Canvas-first collaboration room for humans and agents'
 };
 
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body className="bg-canvas text-ink antialiased">{children}</body>
     </html>
   );
 }

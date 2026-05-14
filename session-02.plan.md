@@ -1,182 +1,280 @@
-# Session 02 Plan
+# Session 02 Summary
 
-## Objective
+## Objective Shift
 
-Validate a real end-to-end Palpa voice loop against local Codex:
+This session started from a voice-first Codex integration goal, but the scope was intentionally narrowed during the session.
 
-`human speech -> Whisper transcript -> Codex role thread -> spoken reply for TTS + artifact output for UI -> visible agent execution state`
+The final objective for this session became:
 
-This session moves beyond mock/local placeholder role replies and proves that the voice platform can drive Codex directly against this repo.
+1. Build a portable shared agent runtime for Palpa that can drive Codex now and other coding harnesses later.
+2. Validate that runtime by exposing a chat-oriented backend in the real product API.
 
-## Progress In This Session
+Voice integration is explicitly deferred. The only voice-related concern preserved here is that the runtime and streaming model should remain usable by voice later.
 
-### Completed
+## What Was Completed
 
-- Replaced the abandoned OpenAI API / OpenAI Agents SDK branch with a local `codex app-server` integration path in the API.
-- Added a long-lived JSON-RPC Codex client in `apps/api/src/codex-client.js`.
-- Added a Codex workspace adapter in `apps/api/src/agents.js` that:
-  - discovers Codex auth state
-  - discovers inherited/system/plugin skills
-  - discovers available Codex apps/connectors
-  - injects repo-local Palpa skills explicitly
-  - keeps one Codex thread per selected role
-  - constrains final role output to:
-    - `spoken_text`
-    - `artifact_text`
-    - `topics`
-- Extended `SessionStore` so each voice session now holds session-scoped Codex state:
-  - `threadsByAgentId`
-  - `skillsByName`
-  - `appsById`
-- Extended `session.started` so the browser receives:
-  - agent roster
-  - Codex auth/config status
-  - discovered skills
-  - discovered apps
-  - discovery warnings
-- Extended reply payloads so the browser receives:
-  - `provider`
-  - `mode`
-  - `thread_id`
-  - `skills_used`
-- Added live agent runtime websocket events in the API:
-  - `agent.stage`
-  - `agent.activity`
-- Mapped Codex runtime notifications into Palpa-oriented execution stages and activity summaries.
-- Extended the browser client to render:
-  - current agent stage
-  - recent runtime activity
-  - Codex turn metadata during a live turn
-- Expanded the role reply contract beyond plain artifact text so replies now carry:
-  - delivery metadata (`should_speak`, `delivery_mode`)
-  - structured artifact fields
-  - next-agent suggestions for supervisor-managed floor flow
-- Simplified the browser UI around:
-  - supervisor/floor visibility
-  - available specialists
-  - next-call choices
-  - spoken-vs-rendered response handling
-- Added repo-local Codex skills for dogfooding:
-  - `.agents/skills/voice-mode`
-  - `.agents/skills/architect-voice`
-  - `.agents/skills/orchestrator-voice`
-  - `.agents/skills/voice-lead`
-  - `.agents/skills/frontend-voice`
-- Verified inherited Codex skills plus repo-local Palpa skills are visible together in app bootstrap.
-- Verified one live Codex turn outside the sandbox against this repo:
-  - Codex returned structured `spoken_text`
-  - Codex returned structured `artifact_text`
-  - Codex used repo-local skills
-  - Codex persisted a real thread id
+### 1. Runtime design formalized
 
-### Known Constraints
+- Rewrote the Codex integration design around a neutral `session + run` runtime model instead of a voice-specific or Codex-shaped public API.
+- Captured the agreed architecture in:
+  - `.agents/agent-harness-integration/design.md`
 
-- `codex app-server` cannot start inside the current Codex sandbox because it needs writable access to Codex home/config state.
-- The integration works when run outside the sandbox on this machine.
-- The live Codex turn can be materially slower than a mock reply, so a 30 second turn timeout is now enforced before fallback.
-- The current artifact handling is text-only. Codex can perform repo work, but the browser does not yet render structured work artifacts such as file changes, command activity, or diff summaries.
+The runtime contract now assumes:
 
-## Scope
+- typed input items
+- unified replayable event stream
+- approvals from day one
+- provider session import/bind support
+- pluggable persistence supplied by the host app
 
-### In scope
+### 2. Shared `agent-runtime` package created
 
-- End-to-end client validation with real microphone input and a real Codex-backed role turn
-- Spoken reply quality suitable for TTS conversation
-- Artifact output that is useful for the client to render separately from speech
-- Codex agent execution against this repo
-- Explicit agent execution state surfaced through the API and visible in the browser
+- Added a new workspace package:
+  - `packages/agent-runtime`
+- Added baseline runtime primitives:
+  - neutral contract helpers
+  - `SessionManager`
+  - `InMemoryRuntimeStore`
+  - `MockAgentProvider`
+  - event fanout/stream support
 
-### Out of scope
+Key files:
 
-- Provider-neutral orchestration layer
-- Multi-provider runtime abstraction
-- Durable persistence across server restarts
-- Full multi-agent floor control / arbitration
-- Human approval UX for Codex tool approval flows
+- `packages/agent-runtime/src/session-manager.js`
+- `packages/agent-runtime/src/in-memory-store.js`
+- `packages/agent-runtime/src/mock-provider.js`
+- `packages/agent-runtime/src/codex-provider.js`
+- `packages/agent-runtime/src/index.js`
 
-## What Still Needs To Be Done
+### 3. Real Codex provider implemented
 
-### 1. End-to-end browser validation
+- Added a real `CodexProvider` for `codex app-server`.
+- Implemented:
+  - stdio process lifecycle
+  - JSON-RPC framing
+  - `initialize` + `initialized` handshake
+  - thread/session mapping
+  - turn/run mapping
+  - streaming item/event mapping
+  - command/file approval request handling
+  - approval response routing back to app-server
+- Added provider-side helpers still needed by the current API bootstrap path:
+  - auth status
+  - skills listing
+  - apps listing
+  - thread read
 
-- Run the full stack locally with:
-  - browser client
-  - API
-  - voice service
-  - local Codex app-server access available to the API process
-- Speak into the client and confirm:
-  - transcript is correct enough for routing
-  - selected role is respected
-  - spoken reply is short and natural when read by Kokoro
-  - artifact output is meaningful and distinct from spoken output
+### 4. API migrated to the shared runtime
 
-### 2. Real artifact work contract
+- Replaced the API’s direct dependency on the old app-specific Codex client.
+- Added:
+  - `apps/api/src/agent-runtime.js`
+- Refactored:
+  - `apps/api/src/agents.js`
 
-- Keep evolving the structured artifact payload now that the API/browser contract includes:
-  - `artifact.text`
-  - `artifact.files_touched`
-  - `artifact.commands_run`
-  - `artifact.tool_activity`
-  - `artifact.diff_summary`
-- Keep `spoken_text` optimized for human conversation and separate from execution evidence.
-- Improve how reliably live Codex turns populate those structured artifact fields, not just fallback/default values.
+The API now uses:
 
-### 3. Agent execution state management
+- the shared runtime for session/run execution
+- the shared Codex provider for Codex-specific discovery/bootstrap needs
 
-- Extend the current stage model as needed. The API now emits explicit `agent.stage` updates and basic runtime activity.
-- Continue refining the stage mapping around states such as:
-  - `bootstrapping`
-  - `discovering_skills`
-  - `routing`
-  - `thinking`
-  - `tool_running`
-  - `editing`
-  - `reply_ready`
-  - `failed`
-- Preserve the current voice turn lifecycle while refining the nested agent execution lifecycle.
+Removed:
 
-### 4. Better handling of Codex runtime notifications
+- `apps/api/src/codex-client.js`
 
-- Expand the current notification mapping so it captures and exposes richer payloads for:
-  - `item/agentMessage/delta`
-  - `item/commandExecution/outputDelta`
-  - `item/fileChange/patchUpdated`
-  - `item/mcpToolCall/progress`
-  - `turn/plan/updated`
-  - `thread/status/changed`
-- Convert those into UI-friendly events instead of only waiting for final turn completion.
+### 5. Chat backend added
 
-### 5. Tool and artifact rendering in the client
+Added a dedicated chat service and backend routes over the shared runtime.
 
-- Keep the client simple, but continue improving:
-  - current floor/supervisor visibility
-  - next-call affordances
-  - files changed / diff summary rendering
-  - commands/tool activity rendering
-  - spoken reply separation from rendered artifacts
+New service:
 
-## Proposed Implementation Order
+- `apps/api/src/chat-service.js`
 
-1. Run the full stack locally and verify one real voice-to-Codex-to-TTS turn from the browser.
-2. Add API event mapping for live Codex execution state and tool activity.
-3. Extend the browser to render agent execution state and artifact panels.
-4. Expand the Codex structured output contract to include execution/artifact metadata.
-5. Re-run end-to-end testing with real repo work, not just advisory replies.
+New backend contract in `apps/api/src/app.js`:
 
-## Success Criteria
+- `GET /chat/bootstrap`
+- `GET /chat/sessions`
+- `POST /chat/sessions`
+- `GET /chat/sessions/:sessionId`
+- `GET /chat/sessions/:sessionId/history`
+- `POST /chat/sessions/:sessionId/runs`
+- `POST /chat/sessions/:sessionId/runs/:runId/interrupt`
+- `POST /chat/sessions/:sessionId/runs/:runId/approvals/:approvalId`
+- `GET /chat/sessions/:sessionId/events`
 
-1. A human can speak to the browser client and trigger a real Codex role turn against this repo.
-2. Codex responds with both:
-   - concise `spoken_text` for Kokoro
-   - richer artifact output for the UI
-3. The browser shows which role/thread handled the request.
-4. The browser shows what Codex is doing while the turn is in progress.
-5. At least one turn demonstrates actual repo-aware work, not just high-level commentary.
+Notes:
 
-## Next Step After Session 02
+- Event streaming is exposed as SSE.
+- The chat backend is runtime-backed.
+- This is separate from the existing voice websocket path.
 
-If this session is validated successfully:
+### 6. Frontend Studio foundation added
 
-1. Persist agent session/thread state beyond process memory.
-2. Add approval and interruption handling for commands, file edits, and MCP elicitation.
-3. Introduce supervisor-level routing rules instead of explicit user-selected routing only.
-4. Start shaping the provider/runtime adapter layer once the direct Codex path is proven stable.
+Built a new web frontend foundation for Palpa Studio and intentionally disregarded the earlier voice-first UI.
+
+The frontend direction was locked as:
+
+- `Studio` shell first
+- canvas-first split layout
+- chat is the only active workflow for now
+- canvas region exists now as a hybrid session board plus promoted-items surface
+- transcript is a shared multi-human, multi-agent room model
+- room-default messaging with future addressing support
+- utility pane hierarchy:
+  - approvals
+  - draft artifacts / promoted items
+  - activity snapshot
+  - files touched / tools used
+
+Implemented:
+
+- new token/theme layer using CSS variables in:
+  - `apps/web/app/theme.css`
+- Tailwind-based styling foundation in:
+  - `apps/web/tailwind.config.js`
+  - `apps/web/postcss.config.mjs`
+  - `apps/web/package.json`
+- new Studio app shell in:
+  - `apps/web/components/studio-app.jsx`
+- app entry updates in:
+  - `apps/web/app/page.js`
+  - `apps/web/app/layout.js`
+  - `apps/web/app/globals.css`
+
+Current frontend behavior:
+
+- bootstrap chat configuration from `GET /chat/bootstrap`
+- create and list chat sessions
+- select an active room/session
+- submit runs against the real backend
+- consume SSE runtime events from `GET /chat/sessions/:sessionId/events`
+- render:
+  - shared transcript
+  - streaming assistant output
+  - approvals
+  - draft artifacts
+  - promoted items
+  - activity snapshot
+  - files touched
+  - tools used
+- interrupt active runs
+- resolve approvals inline
+
+Important product constraint captured during the frontend session:
+
+- the UX now presents the room as multi-human and multi-agent
+- but the current backend runtime path is still effectively one host agent per session
+- true in-room multi-agent routing remains future work
+
+## Testing Completed
+
+Runtime tests:
+
+- `packages/agent-runtime/test/session-manager.test.js`
+- `packages/agent-runtime/test/codex-provider.test.js`
+
+API tests:
+
+- `apps/api/test/chat-service.test.js`
+- `apps/api/test/chat-routes.test.js`
+- existing API tests still pass
+
+Frontend verification:
+
+- `npm install`
+- `npm run build --workspace apps/web`
+
+Verified commands:
+
+- `npm run test --workspace packages/agent-runtime`
+- `npm run test --workspace apps/api`
+
+## Current State
+
+The backend now has:
+
+- a shared neutral runtime abstraction
+- a real Codex provider
+- runtime-backed API execution
+- a chat-oriented backend surface with session/run/history/approval/event endpoints
+
+The frontend now has:
+
+- a new Studio shell aligned to the mock UX direction
+- a portable token/theme foundation using semantic CSS variables plus Tailwind
+- a canvas-first layout with placeholder session-board semantics
+- a real runtime-backed chat client wired to the new backend
+
+This means the Codex integration is no longer blocked on backend runtime architecture or on having a first usable browser surface.
+
+## What Remains
+
+### 1. Frontend refinement and validation
+
+The initial Studio shell is now implemented, but it still needs review and iteration.
+
+Still needed:
+
+- visual review against the intended product feel
+- polish for responsive behavior and panel density
+- stronger session resume/history behavior
+- better event compaction and grouping
+- richer artifact cards and approval presentation
+- proper search / command affordances behind the existing shell placeholders
+- migration/alignment pass against the eventual Atlassian-based host design system
+
+### 2. Approval UX policy
+
+The backend supports approvals now, but frontend and product policy still need decisions around:
+
+- inline approval presentation
+- session-scoped approval choices
+- possible future persistent approval choices
+- failure handling for hidden/stale pending approvals
+
+### 3. Persistence beyond in-memory
+
+Current runtime store in the app path is in-memory.
+
+Still needed:
+
+- a durable runtime store implementation
+- session metadata persistence across process restarts
+- event log persistence
+- approval persistence/recovery
+
+### 4. Chat-specific product shaping
+
+Backend and first-pass frontend exist, but product-level behavior still needs decisions around:
+
+- real project / work-item selection model in the header
+- default room/agent behavior when multiple agents can participate
+- chat session naming
+- history loading and resume strategy
+- event compaction vs full timeline display
+- artifact grouping for commands, diffs, and plans
+- promotion rules between draft artifacts and durable canvas items
+
+### 5. Voice integration later
+
+Not in scope for this session.
+
+When revisited later, voice should consume the shared runtime rather than introducing another Codex-specific execution path.
+
+## Risks / Constraints
+
+- `codex app-server` still cannot be started inside the current Codex sandbox in this environment; it requires writable Codex home/config state outside the sandbox.
+- The backend tests are deterministic and fake-server based, but they do not replace a real local smoke test against an actual `codex app-server`.
+- The API currently imports the runtime package through a direct workspace path:
+  - `../../../packages/agent-runtime/src/index.js`
+  This is fine for the current repo session, but should be cleaned up once workspace dependency linking/install flow is normalized.
+- The new frontend shell is real and build-verified, but it has only been validated through static build success so far, not through a full interactive smoke test against a live local `codex app-server`.
+- The current room UX implies multi-agent participation, but the current chat backend still binds a single selected specialist per session.
+
+## Suggested Next Session
+
+Frontend review and iteration session:
+
+- validate the new shell in-browser against the live backend
+- tighten the transcript / utility / session-board behavior
+- decide the next slice of real canvas semantics
+- prepare the path toward voice on top of the same runtime-backed room model

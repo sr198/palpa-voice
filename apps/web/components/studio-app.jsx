@@ -1,6 +1,6 @@
 'use client';
 
-import { startTransition, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useRef, useState } from 'react';
 
 const apiOrigin = process.env.NEXT_PUBLIC_API_ORIGIN || 'http://127.0.0.1:3001';
 const navItems = [
@@ -98,6 +98,18 @@ function upsertApproval(list, approval) {
   return next;
 }
 
+function formatCommand(value) {
+  if (Array.isArray(value)) {
+    return value.join(' ');
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  return '';
+}
+
 function summarizeEvent(event) {
   switch (event.type) {
     case 'run.started':
@@ -109,7 +121,7 @@ function summarizeEvent(event) {
     case 'approval.resolved':
       return `Approval ${event.decision?.type || 'resolved'}`;
     case 'command.started':
-      return `Command: ${(event.argv || []).join(' ')}`;
+      return `Command: ${formatCommand(event.argv || event.command)}`;
     case 'command.completed':
       return `Command completed with exit code ${event.exitCode}`;
     case 'tool.started':
@@ -346,7 +358,7 @@ export default function StudioApp() {
   const repoName = bootstrap?.codex?.cwd?.split('/').filter(Boolean).at(-1) || 'repo';
   const workItemTitle = activeSession?.title || 'Studio work item';
 
-  const refreshSessions = useEffectEvent(async () => {
+  const refreshSessions = useCallback(async () => {
     const response = await fetch(`${apiOrigin}/chat/sessions`);
     const payload = await response.json();
     if (!response.ok) {
@@ -354,17 +366,15 @@ export default function StudioApp() {
     }
     setSessions(payload.sessions || []);
     return payload.sessions || [];
-  });
+  }, []);
 
-  const createSession = useEffectEvent(async (agentId) => {
+  const createSession = useCallback(async ({ agentId = 'architect', title = 'Palpa studio room' } = {}) => {
     const response = await fetch(`${apiOrigin}/chat/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        title: agentId
-          ? `${bootstrap?.agents?.find((agent) => agent.id === agentId)?.name || 'Agent'} room`
-          : 'Palpa studio room',
-        agent_id: agentId || selectedAgentId
+        title,
+        agent_id: agentId
       })
     });
     const payload = await response.json();
@@ -379,7 +389,7 @@ export default function StudioApp() {
     });
 
     return payload.session;
-  });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -407,7 +417,11 @@ export default function StudioApp() {
         if (loadedSessions.length) {
           setActiveSessionId(loadedSessions[0].id);
         } else {
-          await createSession(bootstrapPayload.agents?.[0]?.id || 'architect');
+          const initialAgent = bootstrapPayload.agents?.[0];
+          await createSession({
+            agentId: initialAgent?.id || 'architect',
+            title: initialAgent ? `${initialAgent.name} room` : 'Palpa studio room'
+          });
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -658,7 +672,10 @@ export default function StudioApp() {
             </div>
             <button
               type="button"
-              onClick={() => void createSession(selectedAgentId)}
+              onClick={() => void createSession({
+                agentId: selectedAgentId || 'architect',
+                title: `${activeAgent?.name || 'Agent'} room`
+              })}
               className="rounded-chip bg-brand px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-[#6f5df7]"
             >
               New room

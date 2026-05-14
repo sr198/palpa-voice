@@ -6,13 +6,47 @@ import { ChatService } from './chat-service.js';
 import { SessionStore } from './session-store.js';
 import { codexRoutingConfigured, discoverCodexWorkspace, gatewayAgent, listAgents } from './agents.js';
 
+function createAllowedOrigins(webOrigin) {
+  const configured = String(webOrigin || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  const allowed = new Set(configured);
+
+  for (const origin of configured) {
+    try {
+      const url = new URL(origin);
+      if (url.hostname === '127.0.0.1') {
+        url.hostname = 'localhost';
+        allowed.add(url.toString().replace(/\/$/, ''));
+      } else if (url.hostname === 'localhost') {
+        url.hostname = '127.0.0.1';
+        allowed.add(url.toString().replace(/\/$/, ''));
+      }
+    } catch {
+      // Ignore malformed origin entries and preserve existing configured values only.
+    }
+  }
+
+  return allowed;
+}
+
 export async function buildApp({ config = defaultConfig, random = Math.random, chatService = null } = {}) {
   const app = Fastify();
   const store = new SessionStore({ config, random });
   const chats = chatService || new ChatService({ config });
+  const allowedOrigins = createAllowedOrigins(config.webOrigin);
 
   await app.register(cors, {
-    origin: config.webOrigin
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.has(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`Origin ${origin} is not allowed by CORS.`), false);
+    }
   });
   await app.register(websocket);
 
@@ -149,7 +183,12 @@ export async function buildApp({ config = defaultConfig, random = Math.random, c
     try {
       const abortController = new AbortController();
       request.raw.on('close', () => abortController.abort());
+      const requestOrigin = request.headers.origin;
 
+      if (requestOrigin && allowedOrigins.has(requestOrigin)) {
+        reply.raw.setHeader('Access-Control-Allow-Origin', requestOrigin);
+        reply.raw.setHeader('Vary', 'Origin');
+      }
       reply.raw.setHeader('Content-Type', 'text/event-stream');
       reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
       reply.raw.setHeader('Connection', 'keep-alive');

@@ -121,3 +121,59 @@ test('chat backend routes expose bootstrap, session, run, history, and approval 
 
   await app.close();
 });
+
+test('chat bootstrap allows localhost and 127.0.0.1 dev origins', async () => {
+  const app = await buildApp({
+    config: {
+      webOrigin: 'http://127.0.0.1:3000',
+      voiceHealthUrl: 'http://voice/health'
+    },
+    chatService: createChatServiceStub()
+  });
+
+  const localhost = await app.inject({
+    method: 'GET',
+    url: '/chat/bootstrap',
+    headers: {
+      origin: 'http://localhost:3000'
+    }
+  });
+  assert.equal(localhost.statusCode, 200);
+  assert.equal(localhost.headers['access-control-allow-origin'], 'http://localhost:3000');
+
+  const loopback = await app.inject({
+    method: 'GET',
+    url: '/chat/bootstrap',
+    headers: {
+      origin: 'http://127.0.0.1:3000'
+    }
+  });
+  assert.equal(loopback.statusCode, 200);
+  assert.equal(loopback.headers['access-control-allow-origin'], 'http://127.0.0.1:3000');
+
+  await app.close();
+});
+
+test('chat events stream includes CORS headers for allowed dev origins', async () => {
+  const app = await buildApp({
+    config: {
+      webOrigin: 'http://127.0.0.1:3000',
+      voiceHealthUrl: 'http://voice/health'
+    },
+    chatService: createChatServiceStub()
+  });
+
+  const events = await app.inject({
+    method: 'GET',
+    url: '/chat/sessions/session_1/events',
+    headers: {
+      origin: 'http://localhost:3000'
+    }
+  });
+  assert.equal(events.statusCode, 200);
+  assert.equal(events.headers['access-control-allow-origin'], 'http://localhost:3000');
+  assert.match(events.body, /event: ready/);
+  assert.match(events.body, /event: runtime/);
+
+  await app.close();
+});
